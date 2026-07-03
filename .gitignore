@@ -1,0 +1,54 @@
+# Harness-House Git Ignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Node / frontend
+node_modules/
+.vite/
+coverage/
+
+# Config with secrets
+config.yaml
+*.env
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local Home Assistant discovery snapshots
+data/
+ha-*-summary.json
+ha-*-snapshot.json
+data/*.local.json
+data/*.local.json.bak-*
+data/*.local.jsonl
+
+# Virtual env
+venv/
+.venv/
+env/
+data/*.local.json
+data/audit.jsonl
+data/timing-test-results.json
+home_model_cache.json

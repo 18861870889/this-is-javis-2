@@ -1,0 +1,28 @@
+{
+  "name": "harness-house-jarvis",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "dev:vite": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "test": "vitest run",
+    "test:adapter": "vitest run src/adapters",
+    "jarvis:latency": "node scripts/jarvis-latency-smoke.mjs",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "express": "^5.2.1",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "three": "^0.181.2",
+    "vite": "^7.2.7"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.60.0",
+    "vitest": "^4.1.8"
+  }
+}
