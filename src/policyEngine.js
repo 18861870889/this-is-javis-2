@@ -16,7 +16,8 @@ const PROTECTED_TYPES = new Set([
   "alarm_control_panel",
 ]);
 const PROTECTED_DOMAINS = new Set(["lock", "alarm_control_panel", "valve"]);
-const PROTECTED_TARGET_PATTERN = /door_lock|lock|门锁|燃气|gas|水阀|阀门|valve|alarm|报警/;
+const PROTECTED_TARGET_PATTERN =
+  /door_lock|lock|门锁|燃气|gas|水阀|阀门|valve|alarm|报警|camera|摄像|监控|microphone|mic|麦克风|录音/;
 const LONG_RUNNING_TYPES = new Set(["washer", "dryer", "robot_vacuum"]);
 
 export function evaluateExecutionPolicy({

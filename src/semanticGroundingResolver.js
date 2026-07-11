@@ -9,6 +9,17 @@ export function normalizeSemanticPlannerActions(actions = [], { input = "", home
 
   for (const action of actions) {
     const resolved = resolveSemanticTarget(action, { input, home });
+    if (!resolved.ok && resolved.code === "ambiguous_target" && shouldExpandLightCategoryTarget(action, resolved.candidates, { input, home })) {
+      for (const target of resolved.candidates) {
+        normalized.push({
+          ...action,
+          device_id: target.id,
+          capability: action.capability || defaultCapabilityForTarget(target),
+          reason: action.reason || `${action.target || action.device_id || action.name} 已展开到 ${target.name}`,
+        });
+      }
+      continue;
+    }
     if (!resolved.ok) {
       rejected.push(resolved.message);
       normalized.push(action);
@@ -105,6 +116,11 @@ export function resolveSemanticTarget(action = {}, { input = "", home } = {}) {
   if (candidates.length === 0 && fallbackRoomIds.size > 0 && looksLikeGenericLightTarget(targetRef)) {
     candidates = semanticTargets.filter((candidate) => fallbackRoomIds.has(candidate.roomId) && isLightTarget(candidate));
   }
+  if (candidates.length === 0 && fallbackRoomIds.size > 0 && lightCategoryForTarget(targetRef)) {
+    candidates = semanticTargets.filter((candidate) =>
+      fallbackRoomIds.has(candidate.roomId) && targetLightCategoryMatchesCandidate(targetRef, candidate),
+    );
+  }
   const roomFiltered = explicitRoomIds.size > 0
     ? candidates.filter((candidate) => explicitRoomIds.has(candidate.roomId))
     : candidates;
@@ -118,6 +134,14 @@ export function resolveSemanticTarget(action = {}, { input = "", home } = {}) {
   }
   const usable = explicitRoomIds.size > 0 ? (roomFiltered.length > 0 ? roomFiltered : candidates) : candidates;
   if (usable.length === 0) return { ok: false, code: "unknown_target", message: `未知语义目标 ${targetRef}` };
+  const primaryRoomLight = preferPrimaryRoomLightForGenericTarget(targetRef, usable, { home });
+  if (primaryRoomLight) {
+    return {
+      ok: true,
+      target: primaryRoomLight,
+      reason: `${targetRef} 已按房间主灯落地到 HCM ${primaryRoomLight.name}`,
+    };
+  }
   if (usable.length > 1) {
     return {
       ok: false,
@@ -177,8 +201,46 @@ function isLightTarget(candidate) {
   return candidate.type === "light" || /灯|light/i.test(candidate.name);
 }
 
+function shouldExpandLightCategoryTarget(action, candidates = [], { input = "", home } = {}) {
+  const targetRef = firstNonEmpty(action.target, action.device_id, action.thingId, action.name);
+  const roomIds = new Set([
+    ...(action.room_id ? [action.room_id] : []),
+    ...findSpecificRoomIds(input, home),
+  ]);
+  return Boolean(lightCategoryForTarget(targetRef)) && roomIds.size > 0 && candidates.length > 1;
+}
+
+function targetLightCategoryMatchesCandidate(targetRef, candidate) {
+  const category = lightCategoryForTarget(targetRef);
+  const name = normalizeText(candidate?.name);
+  if (!category || !isLightTarget(candidate)) return false;
+  if (category === "spotlight") return /射灯/.test(name);
+  if (category === "ceiling") return /吊灯|吸顶灯|主灯/.test(name);
+  if (category === "strip") return /灯带|氛围灯/.test(name);
+  return false;
+}
+
+function lightCategoryForTarget(targetRef) {
+  const text = normalizeText(targetRef);
+  if (/射灯/.test(text)) return "spotlight";
+  if (/吊灯|吸顶灯|主灯/.test(text)) return "ceiling";
+  if (/灯带|氛围灯/.test(text)) return "strip";
+  return "";
+}
+
+function preferPrimaryRoomLightForGenericTarget(targetRef, candidates = [], { home } = {}) {
+  if (!looksLikeGenericLightTarget(targetRef)) return null;
+  const targetRooms = findSpecificRoomIds(targetRef, home);
+  if (targetRooms.length === 0) return null;
+  const sameRoom = candidates.filter((candidate) => targetRooms.includes(candidate.roomId) && isLightTarget(candidate));
+  if (sameRoom.length <= 1) return null;
+  const primary = sameRoom.filter((candidate) => /主灯|吸顶灯|吊灯/.test(normalizeText(candidate.name)));
+  if (primary.length === 1) return primary[0];
+  return null;
+}
+
 function findSpecificRoomIds(input, home) {
-  if (!hasSpecificRoomReference(input)) return [];
+  if (!hasSpecificRoomReference(input, home)) return [];
   return findExplicitRoomIds(input, home);
 }
 

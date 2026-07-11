@@ -3,12 +3,31 @@ const iterations = positiveInteger(process.env.JARVIS_LATENCY_ITERATIONS, 10);
 const duplicateBudgetMs = positiveInteger(process.env.JARVIS_DUPLICATE_P95_MS, 100);
 const fastPathBudgetMs = positiveInteger(process.env.JARVIS_FAST_PATH_P95_MS, 1000);
 const runFastPath = process.env.JARVIS_LATENCY_FAST_PATH === "1";
+const duplicateDeviceA = process.env.JARVIS_LATENCY_DEVICE_A || "latency-a";
+const duplicateDeviceB = process.env.JARVIS_LATENCY_DEVICE_B || "latency-b";
+const duplicateRoomId = process.env.JARVIS_LATENCY_ROOM_ID || "";
+const duplicateText = process.env.JARVIS_LATENCY_DUPLICATE_TEXT || "延迟测试请忽略";
+const fastPathDeviceId = process.env.JARVIS_LATENCY_FAST_PATH_DEVICE_ID || "latency-study";
+const fastPathRoomId = process.env.JARVIS_LATENCY_FAST_PATH_ROOM_ID || "study";
+const fastPathText = process.env.JARVIS_LATENCY_FAST_PATH_TEXT || "打开书房射灯";
 
 const duplicateSamples = [];
 for (let index = 0; index < iterations; index += 1) {
   const wakeSessionId = `latency-duplicate-${Date.now()}-${index}`;
-  await postUtterance({ deviceId: "latency-a", wakeSessionId, text: "延迟测试请忽略" });
-  duplicateSamples.push(await timedPost({ deviceId: "latency-b", wakeSessionId, text: "延迟测试请忽略" }));
+  await postUtterance({
+    deviceId: duplicateDeviceA,
+    roomId: duplicateRoomId,
+    wakeSessionId,
+    text: duplicateText,
+    dryRun: true,
+  });
+  duplicateSamples.push(await timedPost({
+    deviceId: duplicateDeviceB,
+    roomId: duplicateRoomId,
+    wakeSessionId,
+    text: duplicateText,
+    dryRun: true,
+  }));
 }
 report("duplicate", duplicateSamples, duplicateBudgetMs);
 assertRoutes("duplicate", duplicateSamples, new Set(["duplicate_ignored"]));
@@ -17,10 +36,10 @@ if (runFastPath) {
   const fastPathSamples = [];
   for (let index = 0; index < iterations; index += 1) {
     fastPathSamples.push(await timedPost({
-      deviceId: "latency-study",
-      roomId: "study",
+      deviceId: fastPathDeviceId,
+      roomId: fastPathRoomId,
       wakeSessionId: `latency-fast-${Date.now()}-${index}`,
-      text: "打开书房射灯",
+      text: fastPathText,
       dryRun: true,
     }));
   }

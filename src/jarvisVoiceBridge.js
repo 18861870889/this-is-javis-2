@@ -50,9 +50,27 @@ export function normalizeUtterancePayload(payload) {
     trigger: payload.trigger || "voice",
     wakeSessionId: payload.wakeSessionId || payload.sessionId || "",
     locale: payload.locale || "zh-CN",
-    text: payload.text.trim(),
+    text: normalizeVoiceAsrText(payload.text),
     dryRun: Boolean(payload.dryRun),
   };
+}
+
+export function normalizeVoiceAsrText(text) {
+  const value = String(text || "").trim();
+  return value
+    .replace(
+      /(^|[，。,.!?！？\s]|打开|开启|关闭|关掉|关上|查询|看看|看一下|请问|帮我|把)(是我|自我|次我|刺我)(?=(吸顶灯|入户射灯|射灯|灯))/g,
+      "$1次卧",
+    )
+    .replace(
+      /(^|[，。,.!?！？\s]|请|麻烦|帮我|把|将)放(?=(射灯|吊灯|灯带|主灯|吸顶灯|灯)(一下|下|吧|了)?[，。,.!?！？\s]*$)/g,
+      "$1关",
+    )
+    .replace(
+      /(^|[，。,.!?！？\s]|打开|开启|关闭|关掉|关上|查询|看看|看一下|请问|帮我|把|将|关)(过道|书房|主卧|次卧|客厅|餐厅|厨房|阳台|卫生间|猫猫房)?设灯(?=(一|二|三|四|五|六|七|八|九|十|[0-9]|啊|呀|呢|吧|哈|[，。,.!?！？\s]|$))/g,
+      "$1$2射灯",
+    )
+    .replace(/(射灯|吊灯|灯带|主灯|吸顶灯|灯)(啊|呀|呢|吧|哈)([，。,.!?！？\s]*)$/g, "$1$3");
 }
 
 export function classifyUtterance(text) {
@@ -85,7 +103,7 @@ export function classifyUtterance(text) {
   return { route: "hermes_slow_path", reason: "general_assistant_request" };
 }
 
-export function buildHcmPayloadFromUtterance(utterance, classification) {
+export function buildHcmPayloadFromUtterance(utterance, classification, { homeIntent, plannerDraft, plannerDraftSource } = {}) {
   const base = {
     input: utterance.text,
     currentRoomId: utterance.roomId || undefined,
@@ -93,7 +111,16 @@ export function buildHcmPayloadFromUtterance(utterance, classification) {
     sessionId: utterance.wakeSessionId || utterance.deviceId,
     dryRun: utterance.dryRun,
     source: "voice",
+    homeIntent,
   };
+  if (plannerDraft) {
+    return {
+      ...base,
+      skipPlanner: true,
+      plannerDraft,
+      plannerDraftSource,
+    };
+  }
   if (classification.route === "hcm_fast_path") {
     return {
       ...base,
@@ -220,10 +247,21 @@ function buildSimpleStateQueryPlannerDraft(input) {
     needs_confirmation: false,
     query: {
       mode: "state",
+      target: extractStateQueryTarget(text),
       reason: text,
     },
     actions: [],
   };
+}
+
+function extractStateQueryTarget(input) {
+  return String(input || "")
+    .trim()
+    .replace(/[？?。！!，,.\s]+$/g, "")
+    .replace(/^(请问|帮我看看|帮我看一下|看看|看一下|查询)/, "")
+    .replace(/(现在|当前|目前|是?不是|是否|有没有|还)?(开着|关着|亮着|关闭|打开|状态|多少|几度|亮度|温度|湿度|有人|无人)(吗|么|嘛|呢)?$/g, "")
+    .replace(/(吗|么|嘛|呢)$/g, "")
+    .trim();
 }
 
 function looksLikeReadOnlyHomeStateQuery(text) {
@@ -232,19 +270,27 @@ function looksLikeReadOnlyHomeStateQuery(text) {
 
 function parseSimplePowerCommand(text) {
   if (STATE_QUERY_RE.test(text)) return null;
+  const normalized = stripControlRequestPrefix(text);
   for (const [verb, value] of CONTROL_VERBS) {
-    if (!text.startsWith(verb)) continue;
-    const target = text.slice(verb.length).replace(/^(一下|下|那个|这个)/, "").trim();
+    if (!normalized.startsWith(verb)) continue;
+    const target = normalized.slice(verb.length).replace(/^(一下|下|那个|这个)/, "").trim();
     if (!target || target.length > 24 || !HOME_HINT_RE.test(target)) return null;
     return { target, value, confidence: 0.88 };
   }
   for (const [suffix, value] of CONTROL_SUFFIXES) {
-    if (!text.endsWith(suffix)) continue;
-    const target = text.slice(0, -suffix.length).replace(/(一下|下|那个|这个)$/, "").trim();
+    if (!normalized.endsWith(suffix)) continue;
+    const target = normalized.slice(0, -suffix.length).replace(/(一下|下|那个|这个)$/, "").trim();
     if (!target || target.length > 24 || !HOME_HINT_RE.test(target)) return null;
     return { target, value, confidence: 0.84 };
   }
   return null;
+}
+
+function stripControlRequestPrefix(text) {
+  return String(text || "")
+    .replace(/^(请|麻烦|帮我|给我|替我|能不能|可以)?(帮我|给我|请|麻烦)?/, "")
+    .replace(/^(把|将|那个|这个)/, "")
+    .trim();
 }
 
 function fallbackReplyFor(classification) {

@@ -24,14 +24,16 @@ Harness House 不应该直接变成“又一个 Home Assistant 面板”。它�
 
 ```text
 User Command
+  -> Ingress Adapter / Voice Bridge
+  -> Jarvis Brain Intent Recognition
+  -> HomeIntent for home tasks
   -> Context Snapshot
   -> HCM Overlay + Personal Semantics
   -> Context Agent Snapshot
   -> Household Learning Context
   -> Prompt Compile
   -> Prompt Context Pack v2
-  -> LLM Planner
-  -> Intent Frame
+  -> HomeIntent / Intent Frame
   -> Semantic Grounding Resolver
   -> Plan Normalize
   -> Intent Accuracy Engine
@@ -1010,34 +1012,37 @@ Safety Gate 之后增加本地策略层，收窄“能执行”和“此刻应�
 - 失败命令生成 correction hint。
 - 学习上下文不能绕过 HCM normalize、Safety、Policy、Simulation、Decision Review。
 
-### v0.25 - Conversation Router
+### v0.25 - Jarvis Brain Entry Contract
 
-状态：未来计划，暂缓实现。
+状态：M0 基线已实现，后续增强。
 
 目标：
 
-- 在 HCM 之前增加轻量入口路由，避免把所有用户话语都强行解释成智能家居设备控制。
-- 把“家庭 AI”和“设备执行器”分层：HCM 继续负责家居控制和家居状态，Router 负责识别请求类型。
+- 所有入口先进入 Jarvis Brain，避免把用户话语直接丢给 HCM。
+- Brain 负责意图识别、上下文理解和稳定意图契约。
+- 家居任务输出 `HomeIntent` 给 HCM；非家居任务输出 Agent task 给 Hermes/Jarvis Agent。
 
 拟定范围：
 
-- 本地确定性问题：`现在几点了`、`今天几号` 直接由本地回答。
-- 普通对话/故事：`讲个睡前故事` 进入 chat/TTS 路径，不进入 HCM 执行链。
-- 外部知识：`世界杯什么时候开始` 进入未来 external knowledge provider，或明确提示需要联网查询。
+- 本地确定性问题：`现在几点了`、`今天几号` 进入 Agent/local utility 路径。
+- 普通对话/故事：`讲个睡前故事` 进入 Hermes/Jarvis Agent，不进入 HCM 执行链。
+- 外部知识：`世界杯什么时候开始` 进入 Hermes/Jarvis Agent 的联网/资料整理能力。
 - 设备能力查询：`电视有哪些可控制功能` 进入 HCM read-only capability lookup。
-- 家居控制/状态/场景：继续进入当前 LLM Planner -> Intent Frame -> HCM pipeline。
+- 家居控制/状态/场景：Brain 生成 `HomeIntent`，HCM 只做落地、安全、执行、验证和审计。
+- Delivery Router 负责把结果投递成 StackChan 语音摘要、微信完整消息和 task/audit delivery status。
 
 设计约束：
 
-- 不增加额外一次 LLM 调用；优先使用本地高置信规则和现有 intent frame。
-- 规则只做入口分流，不生成设备动作。
-- 低置信或复杂场景仍交给模型和 HCM，而不是靠关键词硬猜。
-- 每条规则必须有误伤测试和 audit reason。
+- M0 本地规则只做高置信低延迟 Brain intent；未来 prompt/model 识别必须输出同一个 `HomeIntent` contract。
+- Brain 不能绕过 HCM 直接选择 HA service 或执行真实设备。
+- HCM 不能承担普通对话、联网查询、资料整理或 PC 操作的主职责。
+- 每条 Brain intent 规则必须有误伤测试和 audit reason。
 
-暂缓原因：
+后续增强：
 
-- 当前先保持 v0.24 Runtime Gate 稳定，不扩大入口行为面。
-- 该能力需要成体系测试非家居请求、能力查询和家居场景的边界，避免把简单规则写成难维护的 if-else。
+- 引入 prompt/model 意图识别，但保持 `HomeIntent` schema 稳定。
+- 完成 Delivery Router 最小版：voiceSummary、wechatMessage、delivery status、内存 voice queue。
+- 把更丰富的低风险 PC actions 接入 Hermes/Jarvis Agent。
 
 ### v1.0 - Open Source AI Smart Home Framework
 
@@ -1176,11 +1181,12 @@ git diff --check
 
 ## 5. 近期实施建议
 
-当前工程基线是 `v0.24`。下一步不要继续扩大真实执行面，先按下面顺序推进：
+当前工程基线已经包含 `Jarvis Brain Entry Contract` 的 M0 版本。下一步不要继续扩大真实执行面，先按下面顺序推进：
 
 1. `v0.10 Real Home Pilot`：只选低风险设备，人工授权真实执行，连续观察稳定性和状态一致性。
-2. `v0.25 Conversation Router`：作为未来计划保留，暂不实现；等 v0.24 安全边界和能力查询回归更稳定后再进入开发。
+2. `v0.25 Jarvis Brain Entry Contract`：继续增强 prompt/model 意图识别，但保持 `HomeIntent` schema 稳定，HCM 仍只做安全落地和执行。
 3. `v1.0`：补齐 E2E、发布包和开源发布流程，并在有条件时增加 Matter/MQTT 实机认证。
+4. `Delivery Router M0`：补齐 voiceSummary、wechatMessage、delivery status 和内存 voice queue。
 
 近期不建议做：
 

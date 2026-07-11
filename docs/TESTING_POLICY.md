@@ -2,6 +2,8 @@
 
 > Harness House 的测试必须保护真实家庭环境。自动化测试默认只读或模拟。
 
+部署和端口安全基线见 [SECURITY_BASELINE.md](SECURITY_BASELINE.md)。真实设备测试前必须完成端口自检和网络访问限制确认。
+
 ## 1. 测试分层
 
 ```text
@@ -49,6 +51,10 @@ Manual Real-device Tests
 
 真实控制前必须确认：
 
+- Jarvis/bridge 端口没有公网裸奔。
+- `auth.enabled=true` 已在支持该配置的上游桥接服务中启用，并配置已知设备白名单。
+- LLM/TTS/STT/HA 等 API Key 没有写入会被暴露或提交的配置文件。
+- 摄像头、门锁、燃气、水阀等保护设备仍被 policy gate 阻断。
 - 目标设备名称。
 - 房间。
 - entity id。

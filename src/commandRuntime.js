@@ -213,6 +213,7 @@ function summarizeExecution(execution) {
     services: (execution.accepted ?? []).map((item) => ({
       thingId: item.thingId,
       thingName: item.thingName,
+      logicalRoomId: item.logicalRoomId,
       capabilityId: item.capabilityId,
       capabilityName: item.capabilityName,
       value: item.value,
@@ -237,6 +238,17 @@ function summarizeExecution(execution) {
           summary: execution.decisionReview.summary,
         }
       : null,
+    rejected: (execution.rejected ?? []).map((item) => ({
+      code: item.code,
+      message: item.message,
+      thingId: item.thingId,
+      thingName: item.thingName,
+      capabilityId: item.capabilityId,
+      capabilityName: item.capabilityName,
+      entityId: item.entityId,
+      roomIds: item.roomIds,
+      allowedRoomIds: item.allowedRoomIds,
+    })),
     results: (execution.results ?? []).map((result) => ({
       ok: result.ok,
       thingId: result.thingId,

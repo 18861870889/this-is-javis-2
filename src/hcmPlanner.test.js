@@ -401,6 +401,29 @@ describe("hcm planner compiler", () => {
     expect(plan.summary).not.toBe("查询玄关传感器");
   });
 
+  it("resolves Brain HomeIntent state query targets before room light aggregates", () => {
+    const plan = normalizeHcmPlannerDraft(
+      "书房射灯开着吗",
+      {
+        intent_type: "state_query",
+        intent: "查询书房射灯状态",
+        confidence: 0.9,
+        summary: "查询书房射灯状态",
+        actions: [],
+        query: { mode: "state", target: "书房射灯", room_id: "study", reason: "用户询问具体灯具状态" },
+      },
+      createStudyPlannerHome({ spot: true, ceiling: false }),
+    );
+
+    expect(plan.kind).toBe("hcm_state_query");
+    expect(plan.stateQuery).toMatchObject({
+      thingId: "asset_study_书房射灯",
+      thingName: "书房射灯",
+    });
+    expect(plan.summary).toContain("书房射灯");
+    expect(plan.summary).not.toContain("书房吊灯");
+  });
+
   it("answers inventory questions with an aggregate result", () => {
     const plan = normalizeHcmPlannerDraft(
       "客厅有几个灯",

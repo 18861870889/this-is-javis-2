@@ -1,7 +1,9 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
+import { createServer as createHttpServer } from "node:http";
+import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { HOME_ASSISTANT_ADAPTER_ID, createHomeAssistantAdapter } from "./src/adapters/homeAssistantAdapter.js";
 import { createProviderAdapterRegistry } from "./src/adapters/providerAdapterRegistry.js";
 import { runAgentRuntime, runContextAgent } from "./src/agentRuntime.js";
@@ -37,12 +39,17 @@ import { expandBatchActions } from "./src/batchExpander.js";
 import { explainIntentResult } from "./src/intentExplainer.js";
 import { applyIntentAccuracyGate, evaluateIntentAccuracy } from "./src/intentAccuracyEngine.js";
 import { reviewDecisionBeforeExecution } from "./src/decisionReview.js";
+import { hasSpecificRoomReference } from "./src/roomAliases.js";
 import {
   applyPersonalSemanticsToThingAliases,
   compilePersonalSemanticsForPlanner,
 } from "./src/personalSemantics.js";
 import { createCommandTrace, finishCommandTrace, runCommandStage } from "./src/commandRuntime.js";
-import { createConversationContextStore } from "./src/conversationContext.js";
+import {
+  createConversationContextStore,
+  isReferentialControlInput,
+  isRoomScopedFollowUpInput,
+} from "./src/conversationContext.js";
 import {
   createLearningMemory,
   compileHouseholdLearningContext,
@@ -56,14 +63,22 @@ import {
   selectUserVisibleLearningSuggestion,
 } from "./src/jarvisLearningFeedback.js";
 import {
+  JARVIS_VOICE_BRIDGE_VERSION,
   buildDuplicateUtteranceResponse,
   buildHcmPayloadFromUtterance,
   buildHermesUnavailableResponse,
   buildUtteranceDedupeKey,
-  classifyUtterance,
   formatVoiceBridgeResponse,
   normalizeUtterancePayload,
+  normalizeVoiceAsrText,
 } from "./src/jarvisVoiceBridge.js";
+import { buildJarvisBrainIntent, createPlannerDraftFromHomeIntent } from "./src/jarvisBrain.js";
+import {
+  buildDeliveryForPcResult,
+  buildDeliveryForVoiceBridgeResult,
+  createDeliveryRouter,
+  createHermesWechatSender,
+} from "./src/deliveryRouter.js";
 import {
   createPendingPromptQueue,
   enqueuePendingPrompt,
@@ -72,10 +87,23 @@ import {
 } from "./src/jarvisPendingPromptQueue.js";
 import { buildRuntimeStatus, getExecutionMode } from "./src/releaseGate.js";
 import { createSpatialEditorState, hasSpatialEditorEdits } from "./src/spatialHomeEditor.js";
+import { applySpatialSemanticOverlay } from "./src/spatialSemanticOverlay.js";
+import { createTaskRuntime, isLongRunningAgentTask } from "./src/taskRuntime.js";
+import { createJarvisContextMemory, summarizeContextMemory } from "./src/jarvisContextMemory.js";
+import {
+  buildSemanticPlanMarkdown,
+  createSemanticPlanningCache,
+  homeSignatureFromHome,
+  recordableHcmStatus,
+  successfulCacheExecutionStatus,
+  summarizeSemanticPlanningCache,
+} from "./src/semanticPlanningCache.js";
+import { isSubagentConfigured, runConfiguredSubagentTask } from "./src/subagentRuntime.js";
 
 const app = express();
 loadLocalEnv();
 const port = getCliPort() ?? Number(process.env.PORT ?? 5173);
+const bindHost = String(process.env.JARVIS_BIND_HOST || process.env.HOST || "127.0.0.1").trim() || "127.0.0.1";
 const hcmOverlayPath = resolve(process.cwd(), process.env.HARNESS_HCM_OVERLAY_PATH || "data/home-model-overlay.local.json");
 const commandAuditPath = resolve(process.cwd(), process.env.HARNESS_COMMAND_AUDIT_PATH || "data/command-audit.local.jsonl");
 const learningMemoryPath = resolve(process.cwd(), process.env.HARNESS_LEARNING_MEMORY_PATH || "data/learning-memory.local.json");
@@ -83,6 +111,12 @@ const providerSnapshotPath = resolve(process.cwd(), process.env.HARNESS_PROVIDER
 const automationMemoryPath = resolve(process.cwd(), process.env.HARNESS_AUTOMATION_MEMORY_PATH || "data/automation-memory.local.json");
 const spatialEditorPath = resolve(process.cwd(), process.env.HARNESS_SPATIAL_EDITOR_PATH || "data/spatial-editor.local.json");
 const pendingPromptQueuePath = resolve(process.cwd(), process.env.JARVIS_PENDING_PROMPT_QUEUE_PATH || "data/pending-prompts.local.json");
+const deliveryAuditPath = resolve(process.cwd(), process.env.JARVIS_DELIVERY_AUDIT_PATH || "data/delivery-audit.local.jsonl");
+const taskAuditPath = resolve(process.cwd(), process.env.JARVIS_TASK_AUDIT_PATH || "data/task-audit.local.jsonl");
+const pcWorkspaceRoot = resolve(process.cwd(), process.env.JARVIS_PC_WORKSPACE_ROOT || "data/pc-workspace.local");
+const jarvisContextMemoryPath = resolve(process.cwd(), process.env.JARVIS_CONTEXT_MEMORY_PATH || "data/jarvis-context.local.json");
+const semanticPlanningCachePath = resolve(process.cwd(), process.env.JARVIS_SEMANTIC_CACHE_PATH || "data/semantic-planning-cache.local.json");
+const semanticPlanningObsidianDir = resolve(process.cwd(), process.env.JARVIS_OBSIDIAN_SEMANTIC_DIR || "data/obsidian-jarvis/semantic-plans");
 const stackchanDeviceRooms = parseStackChanDeviceRooms(process.env.JARVIS_STACKCHAN_DEVICE_ROOMS);
 const configuredVoiceDedupeWindowMs = Number(process.env.JARVIS_UTTERANCE_DEDUPE_WINDOW_MS ?? 1500);
 const voiceUtteranceDedupeWindowMs = Number.isFinite(configuredVoiceDedupeWindowMs) && configuredVoiceDedupeWindowMs > 0
@@ -96,7 +130,38 @@ const homeAssistantAdapter = createHomeAssistantAdapter({
 const providerRegistry = createProviderAdapterRegistry([homeAssistantAdapter]);
 const activeProviderAdapter = providerRegistry.get(HOME_ASSISTANT_ADAPTER_ID);
 const conversationContextStore = createConversationContextStore();
+const deliveryRouter = createDeliveryRouter({
+  writeAudit: writeDeliveryAuditEntry,
+  wechatSender: createHermesWechatSender(),
+});
+const taskRuntime = createTaskRuntime({
+  writeAudit: writeTaskAuditEntry,
+});
+const contextMemory = createJarvisContextMemory({
+  read: readJarvisContextMemory,
+  write: writeJarvisContextMemory,
+});
+const semanticPlanningCache = createSemanticPlanningCache({
+  read: readSemanticPlanningCache,
+  write: writeSemanticPlanningCache,
+  writeMarkdown: writeSemanticPlanMarkdown,
+});
+const MCP_HOME_TOOL_NAMES = new Set(["jarvis_home_command", "home_assistant_control", "turn_on_home_device", "turn_off_home_device", "get_home_device_state"]);
+const MCP_COMPUTER_TOOL_NAMES = new Set(["computer_create_markdown_file"]);
+const MCP_TOOL_NAMES = new Set([...MCP_HOME_TOOL_NAMES, ...MCP_COMPUTER_TOOL_NAMES]);
 
+app.use((request, response, next) => {
+  if (!parseBooleanEnv(process.env.JARVIS_ACCESS_LOG)) {
+    next();
+    return;
+  }
+  const startedAt = Date.now();
+  response.on("finish", () => {
+    const durationMs = Date.now() - startedAt;
+    console.log(`[access] ${request.method} ${request.originalUrl || request.url} ${response.statusCode} ${durationMs}ms from ${request.ip}`);
+  });
+  next();
+});
 app.use(express.json({ limit: "20mb" }));
 
 app.get("/api/runtime/status", (_request, response) => {
@@ -223,8 +288,7 @@ app.get("/api/hcm/home", async (_request, response) => {
   }
 
   try {
-    const home = await homeAssistantAdapter.discoverHcmHome();
-    response.json(applyHcmOverlay(home, readHcmOverlay()));
+    response.json(await discoverCurrentHcmHome());
   } catch (error) {
     response.status(502).json({
       error: error.message || "Home Capability Model sync failed",
@@ -308,7 +372,7 @@ app.post("/api/hcm/overrides/default-run", async (request, response) => {
     writeHcmOverlay(overlay);
     response.json({
       summary,
-      home: applyHcmOverlay(home, overlay),
+      home: applyRuntimeHomeSemantics(home, overlay),
     });
   } catch (error) {
     response.status(error.statusCode || 400).json({
@@ -330,30 +394,55 @@ app.post("/api/hcm/command", async (request, response) => {
 });
 
 app.post("/v1/utterance", async (request, response) => {
-  let dedupeKey = "";
   try {
-    const utterance = applyTrustedStackChanRoom(normalizeUtterancePayload(request.body ?? {}));
-    dedupeKey = buildUtteranceDedupeKey(utterance);
-    const existing = findRecentVoiceUtterance(dedupeKey);
-    if (existing) {
-      response.json(buildDuplicateUtteranceResponse({
-        utterance,
-        handledByDeviceId: existing.deviceId,
-        dedupeKey,
-      }));
+    response.json(await processJarvisUtterancePayload(request.body ?? {}));
+  } catch (error) {
+    response.status(error.statusCode || 502).json({ error: error.message || "Jarvis utterance failed" });
+  }
+});
+
+app.get("/mcp", (_request, response) => {
+  response.json({
+    name: "harness-house-jarvis",
+    transport: "json-rpc-http",
+    tools: Array.from(MCP_TOOL_NAMES),
+    defaultDryRun: !parseBooleanEnv(process.env.JARVIS_MCP_ALLOW_REAL),
+  });
+});
+
+app.post("/mcp", async (request, response) => {
+  try {
+    const payload = request.body;
+    if (Array.isArray(payload)) {
+      response.json(await Promise.all(payload.map((message) => handleMcpJsonRpc(message))));
       return;
     }
-    rememberVoiceUtterance(dedupeKey, utterance);
-    const result = await handleJarvisUtterance(utterance, request.body ?? {});
-    response.json({
-      ...result,
-      duplicate: false,
-      handledByDeviceId: utterance.deviceId,
-      dedupeKey,
-    });
+    const result = await handleMcpJsonRpc(payload);
+    if (!result) {
+      response.status(204).end();
+      return;
+    }
+    response.json(result);
   } catch (error) {
-    if (dedupeKey) voiceUtteranceDedupe.delete(dedupeKey);
-    response.status(error.statusCode || 502).json({ error: error.message || "Jarvis utterance failed" });
+    response.status(error.statusCode || 400).json(mcpError(null, -32603, error.message || "MCP request failed"));
+  }
+});
+
+app.post("/v1/chat/completions", async (request, response) => {
+  try {
+    const completion = await buildJarvisChatCompletion(request.body ?? {}, request.headers ?? {});
+    if (request.body?.stream) {
+      sendOpenAiChatCompletionStream(response, completion);
+      return;
+    }
+    response.json(completion);
+  } catch (error) {
+    response.status(error.statusCode || 400).json({
+      error: {
+        message: error.message || "Jarvis chat completion failed",
+        type: "jarvis_error",
+      },
+    });
   }
 });
 
@@ -448,6 +537,33 @@ app.get("/api/commands/audit", (request, response) => {
   response.json({
     entries: readCommandAuditEntries(limit),
   });
+});
+
+app.get("/api/tasks", (request, response) => {
+  const limit = Math.max(1, Math.min(100, Number(request.query.limit ?? 20)));
+  response.json({
+    tasks: taskRuntime.listTasks({
+      limit,
+      includeTerminal: request.query.active !== "true",
+    }),
+  });
+});
+
+app.get("/api/tasks/:taskId", (request, response) => {
+  const task = taskRuntime.getTask(request.params.taskId);
+  if (!task) {
+    response.status(404).json({ error: "Task not found" });
+    return;
+  }
+  response.json({ task });
+});
+
+app.get("/api/jarvis/context", (_request, response) => {
+  response.json(summarizeContextMemory(readJarvisContextMemory()));
+});
+
+app.get("/api/jarvis/semantic-cache", (_request, response) => {
+  response.json(summarizeSemanticPlanningCache(readSemanticPlanningCache()));
 });
 
 app.post("/api/commands/replay", async (request, response) => {
@@ -590,17 +706,26 @@ app.post("/api/adapters/home-assistant/actions", async (request, response) => {
   });
 });
 
+const httpServer = createHttpServer(app);
+
 const vite = await createViteServer({
   server: {
     middlewareMode: true,
+    hmr: {
+      server: httpServer,
+    },
   },
   appType: "spa",
 });
 
 app.use(vite.middlewares);
 
-app.listen(port, "0.0.0.0", () => {
-  console.log(`Harness House running at http://localhost:${port}/`);
+httpServer.listen(port, bindHost, () => {
+  const displayHost = bindHost === "0.0.0.0" ? "localhost" : bindHost;
+  console.log(`Harness House running at http://${displayHost}:${port}/`);
+  if (bindHost === "0.0.0.0") {
+    console.log("Jarvis is listening on all interfaces. Restrict access with a firewall or private tunnel before real execution.");
+  }
   console.log(
     process.env.OPENAI_API_KEY
       ? `LLM Gateway enabled with model ${getModel()}`
@@ -725,6 +850,9 @@ function validateHcmCommandRequest(payload) {
   if (payload.plannerDraft !== undefined && (typeof payload.plannerDraft !== "object" || Array.isArray(payload.plannerDraft))) {
     throw badRequest("plannerDraft must be an object");
   }
+  if (payload.homeIntent !== undefined && (typeof payload.homeIntent !== "object" || Array.isArray(payload.homeIntent))) {
+    throw badRequest("homeIntent must be an object");
+  }
 }
 
 function validateReplayRequest(payload) {
@@ -787,6 +915,16 @@ function writeSpatialEditorRecord(record) {
 function writeCommandAuditEntry(entry) {
   mkdirSync(dirname(commandAuditPath), { recursive: true });
   appendFileSync(commandAuditPath, `${JSON.stringify(entry)}\n`);
+}
+
+function writeDeliveryAuditEntry(entry) {
+  mkdirSync(dirname(deliveryAuditPath), { recursive: true });
+  appendFileSync(deliveryAuditPath, `${JSON.stringify(entry)}\n`);
+}
+
+function writeTaskAuditEntry(entry) {
+  mkdirSync(dirname(taskAuditPath), { recursive: true });
+  appendFileSync(taskAuditPath, `${JSON.stringify(entry)}\n`);
 }
 
 function readCommandAuditEntries(limit = 20) {
@@ -856,9 +994,53 @@ function writePendingPromptQueue(queue) {
   writeFileSync(pendingPromptQueuePath, `${JSON.stringify(queue, null, 2)}\n`);
 }
 
+function readJarvisContextMemory() {
+  if (!existsSync(jarvisContextMemoryPath)) return null;
+  try {
+    return JSON.parse(readFileSync(jarvisContextMemoryPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Jarvis context memory file is invalid JSON: ${error.message}`);
+  }
+}
+
+function writeJarvisContextMemory(memory) {
+  mkdirSync(dirname(jarvisContextMemoryPath), { recursive: true });
+  writeFileSync(jarvisContextMemoryPath, `${JSON.stringify(memory, null, 2)}\n`);
+}
+
+function readSemanticPlanningCache() {
+  if (!existsSync(semanticPlanningCachePath)) return null;
+  try {
+    return JSON.parse(readFileSync(semanticPlanningCachePath, "utf8"));
+  } catch (error) {
+    throw new Error(`Semantic planning cache file is invalid JSON: ${error.message}`);
+  }
+}
+
+function writeSemanticPlanningCache(cache) {
+  mkdirSync(dirname(semanticPlanningCachePath), { recursive: true });
+  writeFileSync(semanticPlanningCachePath, `${JSON.stringify(cache, null, 2)}\n`);
+}
+
+function writeSemanticPlanMarkdown(entry) {
+  if (!entry?.id) return "";
+  const filename = `${String(entry.id).replace(/[^A-Za-z0-9_-]/g, "_")}.md`;
+  const targetPath = resolve(semanticPlanningObsidianDir, filename);
+  if (basename(targetPath) !== filename) return "";
+  mkdirSync(semanticPlanningObsidianDir, { recursive: true });
+  writeFileSync(targetPath, `${buildSemanticPlanMarkdown(entry)}\n`, "utf8");
+  return targetPath;
+}
+
 async function discoverCurrentHcmHome() {
   const rawHome = await activeProviderAdapter.discoverHcmHome();
-  return applyPersonalSemanticsToThingAliases(applyHcmOverlay(rawHome, readHcmOverlay()));
+  return applyRuntimeHomeSemantics(rawHome);
+}
+
+function applyRuntimeHomeSemantics(rawHome, overlay = readHcmOverlay()) {
+  return applyPersonalSemanticsToThingAliases(
+    applySpatialSemanticOverlay(applyHcmOverlay(rawHome, overlay), readSpatialEditorRecord()),
+  );
 }
 
 function updateLearningMemory(auditEntry) {
@@ -867,9 +1049,45 @@ function updateLearningMemory(auditEntry) {
 }
 
 async function handleJarvisUtterance(utterance, rawPayload) {
-  const classification = classifyUtterance(utterance.text);
+  const taskStatusReply = await maybeReplyWithTaskStatus(utterance.text, {}, originFromVoiceUtterance(utterance));
+  if (taskStatusReply) {
+    return buildAgentTaskVoiceResponse(utterance, {
+      routeReason: "task_status_query",
+      status: "answered",
+      replyText: taskStatusReply,
+      deliveryHandled: true,
+    });
+  }
 
-  if (classification.route === "learning_feedback") {
+  const contextReply = await maybeReplyWithContextMemory(utterance.text, originFromVoiceUtterance(utterance));
+  if (contextReply) {
+    return buildAgentTaskVoiceResponse(utterance, {
+      routeReason: contextReply.type,
+      status: "answered",
+      commandId: contextReply.taskId,
+      replyText: contextReply.replyText,
+      delivery: contextReply.delivery,
+      deliveryHandled: true,
+    });
+  }
+
+  const pcMarkdownRequest = parsePcMarkdownRequest(utterance.text);
+  if (pcMarkdownRequest) return handlePcMarkdownUtterance(utterance, pcMarkdownRequest);
+
+  if (isLongRunningAgentTask(utterance.text)) {
+    const replyText = await startLongRunningHermesTask(utterance.text, originFromVoiceUtterance(utterance));
+    return buildAgentTaskVoiceResponse(utterance, {
+      routeReason: "long_running_agent_task",
+      status: "queued",
+      replyText,
+      deliveryHandled: true,
+    });
+  }
+
+  const brainIntent = buildJarvisBrainIntent({ text: utterance.text, utterance });
+  const classification = brainIntent.classification;
+
+  if (brainIntent.type === "learning_feedback") {
     const feedback = await applyLearningFeedbackRequest({
       ...rawPayload,
       text: utterance.text,
@@ -898,7 +1116,7 @@ async function handleJarvisUtterance(utterance, rawPayload) {
     };
   }
 
-  if (classification.route === "hcm_fast_path" || classification.route === "hcm_slow_path") {
+  if (brainIntent.type === "home_intent") {
     if (!homeAssistantAdapter.isConfigured()) {
       const fallbackClassification = {
         route: "hermes_slow_path",
@@ -920,7 +1138,25 @@ async function handleJarvisUtterance(utterance, rawPayload) {
         },
       });
     }
-    const hcmResult = await runHcmCommandPipeline(buildHcmPayloadFromUtterance(utterance, classification));
+    const useExternalSemanticPlanner = classification.reason !== "read_only_home_state_query";
+    const semanticCacheHit = useExternalSemanticPlanner ? await maybeGetSemanticPlanCacheDraft(utterance) : null;
+    const hermesPlannerDraft = useExternalSemanticPlanner && !semanticCacheHit?.plannerDraft ? await maybeBuildHermesHomeIntentDraft(utterance) : null;
+    const plannerDraft = semanticCacheHit?.plannerDraft || hermesPlannerDraft;
+    const plannerDraftSource = semanticCacheHit?.plannerDraft
+      ? "semantic_planning_cache"
+      : hermesPlannerDraft ? "hermes_home_intent" : "";
+    const hcmResult = await runHcmCommandPipeline(buildHcmPayloadFromUtterance(utterance, classification, {
+      homeIntent: plannerDraft ? null : brainIntent.homeIntent,
+      plannerDraft,
+      plannerDraftSource,
+    }));
+    if (useExternalSemanticPlanner) await recordSemanticPlanCacheFromHcm({
+      utterance,
+      hcmResult,
+      plannerDraft: plannerDraft || createPlannerDraftFromHomeIntent(brainIntent.homeIntent),
+      source: plannerDraftSource || "jarvis_brain_home_intent",
+      cacheHit: semanticCacheHit,
+    });
     const learningSuggestion = await buildUserVisibleLearningSuggestion(hcmResult.commandId, utterance);
     return formatVoiceBridgeResponse({ utterance, classification, hcmResult, learningSuggestion });
   }
@@ -928,6 +1164,990 @@ async function handleJarvisUtterance(utterance, rawPayload) {
   const hermesResult = await callHermesSlowPath(utterance);
   if (!hermesResult) return buildHermesUnavailableResponse(utterance, classification);
   return formatVoiceBridgeResponse({ utterance, classification, hermesResult });
+}
+
+async function handlePcMarkdownUtterance(utterance, pcMarkdownRequest) {
+  const result = createPcMarkdownFile(pcMarkdownRequest);
+  const origin = originFromVoiceUtterance(utterance);
+  contextMemory.rememberPcFile(result, origin);
+  const delivery = await routePcResultDelivery(result, origin);
+  const replyText = delivery.voiceSummary || result.replyText;
+  return buildAgentTaskVoiceResponse(utterance, {
+    routeReason: "pc_markdown_file",
+    status: result.status,
+    commandId: result.path,
+    replyText,
+    delivery,
+    deliveryHandled: true,
+  });
+}
+
+function buildAgentTaskVoiceResponse(utterance, {
+  routeReason,
+  status,
+  commandId = null,
+  replyText = "",
+  delivery = null,
+  deliveryHandled = false,
+} = {}) {
+  return {
+    version: JARVIS_VOICE_BRIDGE_VERSION,
+    deviceId: utterance.deviceId,
+    roomId: utterance.roomId,
+    wakeSessionId: utterance.wakeSessionId,
+    trigger: utterance.trigger,
+    route: "agent_task",
+    routeReason,
+    commandId,
+    status,
+    risk: "low",
+    speak: Boolean(replyText),
+    display: replyText,
+    replyText,
+    learnedSuggestion: null,
+    latencyMs: 0,
+    ...(delivery ? { delivery } : {}),
+    deliveryHandled,
+  };
+}
+
+function originFromVoiceUtterance(utterance = {}) {
+  return {
+    ingress: "voice_bridge",
+    trigger: utterance.trigger || "voice",
+    sourceDeviceId: utterance.deviceId || "",
+    roomId: utterance.roomId || "",
+    wakeSessionId: utterance.wakeSessionId || "",
+  };
+}
+
+async function processJarvisUtterancePayload(rawPayload) {
+  let dedupeKey = "";
+  try {
+    const utterance = applyTrustedRoomTextDefaults(applyTrustedStackChanRoom(normalizeUtterancePayload(rawPayload ?? {})));
+    validateJarvisIngressPolicy({ text: utterance.text, roomId: utterance.roomId, deviceId: utterance.deviceId });
+    dedupeKey = buildUtteranceDedupeKey(utterance);
+    const existing = findRecentVoiceUtterance(dedupeKey);
+    if (existing) {
+      return buildDuplicateUtteranceResponse({
+        utterance,
+        handledByDeviceId: existing.deviceId,
+        dedupeKey,
+      });
+    }
+    rememberVoiceUtterance(dedupeKey, utterance);
+    const result = await handleJarvisUtterance(utterance, rawPayload ?? {});
+    const deliveredResult = await attachDeliveryToVoiceBridgeResult(result, utterance);
+    return {
+      ...deliveredResult,
+      duplicate: false,
+      handledByDeviceId: utterance.deviceId,
+      dedupeKey,
+    };
+  } catch (error) {
+    if (dedupeKey) voiceUtteranceDedupe.delete(dedupeKey);
+    throw error;
+  }
+}
+
+async function attachDeliveryToVoiceBridgeResult(result, utterance) {
+  if (result?.deliveryHandled) return result;
+  if (!result || result.speak === false || result.status === "duplicate_ignored") return result;
+  const message = buildDeliveryForVoiceBridgeResult(result, {
+    utterance,
+    source: "voice_bridge",
+  });
+  const delivery = await deliveryRouter.route(message);
+  const voiceSummary = delivery.voiceSummary || result.replyText || result.display;
+  return {
+    ...result,
+    delivery,
+    replyText: voiceSummary,
+    display: voiceSummary || result.display,
+  };
+}
+
+async function handleMcpJsonRpc(message) {
+  if (!message || message.jsonrpc !== "2.0" || typeof message.method !== "string") {
+    return mcpError(message?.id ?? null, -32600, "Invalid MCP JSON-RPC request");
+  }
+  if (message.id === undefined && message.method.startsWith("notifications/")) return null;
+
+  if (message.method === "initialize") {
+    return mcpResult(message.id, {
+      protocolVersion: "2024-11-05",
+      capabilities: { tools: {} },
+      serverInfo: {
+        name: "home-assistant",
+        version: "0.1.0",
+      },
+    });
+  }
+  if (message.method === "ping") return mcpResult(message.id, {});
+  if (message.method === "tools/list") {
+    return mcpResult(message.id, {
+      tools: await buildMcpTools(),
+    });
+  }
+  if (message.method === "tools/call") {
+    const name = message.params?.name;
+    if (!MCP_TOOL_NAMES.has(name)) {
+      return mcpError(message.id, -32602, `Unknown tool: ${name || ""}`);
+    }
+    if (MCP_COMPUTER_TOOL_NAMES.has(name)) {
+      return mcpResult(message.id, await callJarvisComputerTool(name, message.params?.arguments ?? {}));
+    }
+    return mcpResult(message.id, await callJarvisHomeCommandTool(name, message.params?.arguments ?? {}));
+  }
+  return mcpError(message.id, -32601, `Unknown MCP method: ${message.method}`);
+}
+
+async function buildMcpTools() {
+  return [
+    ...await buildMcpHomeTools(),
+    mcpComputerMarkdownTool(),
+  ];
+}
+
+async function buildMcpHomeTools() {
+  const context = await buildMcpHomeToolContext();
+  const contextSuffix = context ? `\n${context}` : "";
+  const callInstruction = "当用户要求控制或查询家里设备时必须调用此工具，不要回答“没有控制能力”。工具会进入 Jarvis HCM 安全、审计、去重和 Home Assistant 执行链路。";
+  return [
+    mcpHomeCommandTool(
+      "home_assistant_control",
+      `${callInstruction} 适用于打开/关闭/查询灯、射灯、吸顶灯、空调、风扇、窗帘、电视等。用户说“打开次卧吸顶灯”“关闭书房射灯”“客厅灯开着吗”时调用。${contextSuffix}`,
+    ),
+    mcpHomeCommandTool(
+      "jarvis_home_command",
+      `${callInstruction} Route a StackChan/Xiaozhi utterance into Jarvis HCM. Use for smart-home control or state queries.${contextSuffix}`,
+    ),
+    mcpTargetTool("turn_on_home_device", `打开指定的智能家居设备，例如打开次卧吸顶灯、打开书房射灯。${contextSuffix}`),
+    mcpTargetTool("turn_off_home_device", `关闭指定的智能家居设备，例如关闭次卧吸顶灯、关闭书房射灯。${contextSuffix}`),
+    mcpTargetTool("get_home_device_state", `查询指定智能家居设备的状态，例如次卧吸顶灯开着吗。${contextSuffix}`),
+  ];
+}
+
+async function buildMcpHomeToolContext() {
+  if (!activeProviderAdapter.isConfigured()) return "";
+  try {
+    const home = await discoverCurrentHcmHome();
+    const allowedRoomIds = parseAllowedActionRoomIds();
+    const roomNames = new Map((home.spaces ?? []).map((space) => [space.id, space.name || space.id]));
+    const allowedRoomNames = Array.from(allowedRoomIds).map((roomId) => roomNames.get(roomId) || roomId);
+    const targets = [];
+    const plannerDevices = compileHcmForPlanner(home, { limit: 200 })
+      .filter((device) => (device.capabilities ?? []).some(isMcpControllableCapability))
+      .sort((first, second) => compareMcpContextTargets(first, second, roomNames, home));
+    for (const device of plannerDevices) {
+      if (allowedRoomIds.size > 0 && !allowedRoomIds.has(device.roomId)) continue;
+      const capabilities = (device.capabilities ?? []).filter(isMcpControllableCapability);
+      if (!capabilities.length) continue;
+      const roomName = roomNames.get(device.roomId) || device.roomId || "未知房间";
+      const capabilityNames = capabilities.slice(0, 3).map((capability) => capability.name).join("/");
+      targets.push(`${device.name}（${roomName}，${capabilityNames}）`);
+    }
+    const guard = allowedRoomNames.length ? `当前真实执行只允许目标房间：${allowedRoomNames.join("、")}。` : "";
+    const targetSummary = targets.length ? `当前可控目标示例：${targets.slice(0, 24).join("；")}。` : "";
+    return `${guard}${targetSummary}`.trim();
+  } catch (error) {
+    return "";
+  }
+}
+
+function compareMcpContextTargets(first, second, roomNames, home) {
+  return mcpContextTargetRank(first, roomNames, home) - mcpContextTargetRank(second, roomNames, home)
+    || String(first.name).localeCompare(String(second.name), "zh-CN");
+}
+
+function mcpContextTargetRank(device, roomNames, home) {
+  let rank = 100;
+  if (device.logicalAsset) rank -= 40;
+  if (device.type === "light" || /灯|照明/.test(device.name ?? "")) rank -= 25;
+  const room = (home.spaces ?? []).find((space) => space.id === device.roomId);
+  if (room?.spatialSemantic?.custom) rank -= 30;
+  if (/过道/.test(`${device.name ?? ""}${roomNames.get(device.roomId) ?? ""}`)) rank -= 10;
+  return rank;
+}
+
+function isMcpControllableCapability(capability) {
+  if (capability?.access === "execute") return ["control", "action"].includes(capability.kind);
+  return ["control", "action"].includes(capability?.kind)
+    && capability?.policy?.autoExecutable
+    && capability?.policy?.risk === "low"
+    && capability?.policy?.confirmation === "never";
+}
+
+function mcpHomeCommandTool(name, description) {
+  return {
+    name,
+    description,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        text: { type: "string", description: "用户的完整中文家居指令，例如：打开次卧吸顶灯" },
+        deviceId: { type: "string", description: "StackChan 或小智设备 ID。可省略，默认 stackchan-mcp。" },
+        roomId: { type: "string", description: "可信来源房间 ID，例如 second。可省略，Jarvis 可按设备映射推断。" },
+        wakeSessionId: { type: "string", description: "唤醒会话 ID，用于多设备去重。可省略。" },
+        trigger: { type: "string", description: "触发来源，默认 mcp。" },
+        dryRun: { type: "boolean", description: "默认 true。真实执行还必须满足 JARVIS_MCP_ALLOW_REAL=true 和 HARNESS_EXECUTION_MODE=real。" },
+      },
+      required: ["text"],
+    },
+  };
+}
+
+function mcpTargetTool(name, description) {
+  return {
+    name,
+    description,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        target: { type: "string", description: "设备名称，例如：次卧吸顶灯" },
+        room: { type: "string", description: "房间名称，例如：次卧" },
+        text: { type: "string", description: "可选。用户原始完整指令。" },
+        deviceId: { type: "string", description: "StackChan 或小智设备 ID。可省略。" },
+        roomId: { type: "string", description: "可信来源房间 ID，例如 second。可省略。" },
+        wakeSessionId: { type: "string", description: "唤醒会话 ID，可省略。" },
+        dryRun: { type: "boolean", description: "默认 true。真实执行还必须满足服务端真实执行闸门。" },
+      },
+      required: ["target"],
+    },
+  };
+}
+
+function mcpComputerMarkdownTool() {
+  return {
+    name: "computer_create_markdown_file",
+    description: `在 Jarvis PC 的受限工作区创建 Markdown 文件。只允许 .md 文件，根目录为 ${pcWorkspaceRoot}。适用于“在电脑上新建一个 md 文件并写入 helloworld”。`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        filename: { type: "string", description: "Markdown 文件名。可省略，默认 hello.md；无扩展名时自动补 .md。" },
+        content: { type: "string", description: "要写入文件的文本。可省略，默认 helloworld。" },
+        overwrite: { type: "boolean", description: "是否覆盖已存在文件，默认 false。" },
+      },
+    },
+  };
+}
+
+async function callJarvisHomeCommandTool(toolName, args) {
+  const text = buildMcpToolText(toolName, args);
+  if (!text) throw statusError("jarvis_home_command requires text", 400);
+
+  const deviceId = String(args.deviceId || "stackchan-mcp").trim();
+  const roomId = String(args.roomId || stackchanDeviceRooms.get(deviceId) || "").trim();
+  validateMcpBridgePolicy({ text, roomId });
+  const mcpAllowsReal = parseBooleanEnv(process.env.JARVIS_MCP_ALLOW_REAL);
+  const requestedDryRun = args.dryRun === undefined ? true : Boolean(args.dryRun);
+  const dryRun = mcpAllowsReal ? requestedDryRun : true;
+  const payload = {
+    deviceId,
+    roomId,
+    wakeSessionId: String(args.wakeSessionId || `mcp-${Date.now()}`).trim(),
+    trigger: String(args.trigger || "mcp").trim(),
+    text,
+    dryRun,
+  };
+  const result = await processJarvisUtterancePayload(payload);
+  const replyText = formatMcpToolReplyText(result);
+  return {
+    content: [{ type: "text", text: replyText }],
+    structuredContent: {
+      ...result,
+      mcp: {
+        dryRunForced: !mcpAllowsReal && requestedDryRun === false,
+        allowReal: mcpAllowsReal,
+      },
+    },
+    isError: ["dry_run", "rejected", "integration_unavailable", "brain_timeout", "brain_unavailable"].includes(result.status),
+  };
+}
+
+async function callJarvisComputerTool(toolName, args) {
+  if (toolName !== "computer_create_markdown_file") throw statusError(`Unknown computer tool: ${toolName}`, 400);
+  const result = createPcMarkdownFile(args);
+  const origin = {
+    ingress: "mcp",
+    trigger: "mcp",
+    sourceDeviceId: String(args.deviceId || "stackchan-mcp").trim(),
+    roomId: String(args.roomId || "").trim(),
+    wakeSessionId: String(args.wakeSessionId || "").trim(),
+  };
+  contextMemory.rememberPcFile(result, origin);
+  const delivery = await routePcResultDelivery(result, origin);
+  const replyText = delivery.voiceSummary || result.replyText;
+  return {
+    content: [{ type: "text", text: replyText }],
+    structuredContent: {
+      ...result,
+      replyText,
+      delivery,
+    },
+    isError: false,
+  };
+}
+
+function createPcMarkdownFile(args = {}) {
+  const filename = normalizeMarkdownFilename(args.filename);
+  const content = args.content === undefined ? "helloworld" : String(args.content);
+  const overwrite = Boolean(args.overwrite);
+  const targetPath = resolve(pcWorkspaceRoot, filename);
+  if (basename(targetPath) !== filename) throw statusError("Markdown filename is invalid", 400);
+
+  mkdirSync(pcWorkspaceRoot, { recursive: true });
+  if (existsSync(targetPath) && !overwrite) {
+    throw statusError(`电脑工作区里已经有 ${filename}，为了安全我没有覆盖。`, 409);
+  }
+
+  writeFileSync(targetPath, content, "utf8");
+  const operation = overwrite ? "updated" : "created";
+  const preview = summarizeSpeakableContent(content);
+  return {
+    status: "completed",
+    operation: "computer_create_markdown_file",
+    fileOperation: operation,
+    filename,
+    path: targetPath,
+    workspaceRoot: pcWorkspaceRoot,
+    bytes: Buffer.byteLength(content, "utf8"),
+    replyText: `${overwrite ? "已更新" : "已创建"}电脑工作区里的 ${filename}，写入内容：${preview}。`,
+  };
+}
+
+async function routePcResultDelivery(result, origin) {
+  return deliveryRouter.route(buildDeliveryForPcResult(result, {
+    origin,
+    source: "pc_markdown_file",
+  }));
+}
+
+function normalizeMarkdownFilename(filename) {
+  const raw = String(filename || "hello.md").trim() || "hello.md";
+  if (raw.includes("\0") || /[\\/]/.test(raw) || raw.includes("..")) {
+    throw statusError("Markdown filename must be a simple file name inside the Jarvis PC workspace", 400);
+  }
+  const withExtension = /\.[^.\s]+$/.test(raw) ? raw : `${raw}.md`;
+  if (!withExtension.toLowerCase().endsWith(".md")) throw statusError("Only .md files can be created by this tool", 400);
+  const safe = basename(withExtension);
+  if (!safe || safe !== withExtension || safe === "." || safe === "..") throw statusError("Markdown filename is invalid", 400);
+  return safe;
+}
+
+function summarizeSpeakableContent(content) {
+  const trimmed = String(content ?? "").replace(/\s+/g, " ").trim();
+  if (!trimmed) return "空内容";
+  return trimmed.length > 40 ? `${trimmed.slice(0, 40)}...` : trimmed;
+}
+
+async function buildJarvisChatCompletion(payload, headers = {}) {
+  const created = Math.floor(Date.now() / 1000);
+  const model = String(payload.model || "jarvis");
+  const userText = extractChatCompletionUserText(payload.messages);
+  if (!userText) throw statusError("messages must include a user message", 400);
+  const content = await buildJarvisBrainReply(userText, { headers });
+  return {
+    id: `chatcmpl-jarvis-${Date.now()}`,
+    object: "chat.completion",
+    created,
+    model,
+    choices: [{
+      index: 0,
+      message: {
+        role: "assistant",
+        content,
+      },
+      finish_reason: "stop",
+    }],
+    usage: {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    },
+  };
+}
+
+async function buildJarvisBrainReply(text, { headers = {} } = {}) {
+  const normalizedText = normalizeSpokenText(text);
+  const taskStatusReply = await maybeReplyWithTaskStatus(normalizedText, headers);
+  if (taskStatusReply) return taskStatusReply;
+
+  const contextReply = await maybeReplyWithContextMemory(normalizedText, resolveXiaozhiDeliveryOrigin(headers));
+  if (contextReply) return contextReply.replyText;
+
+  const pcMarkdownRequest = parsePcMarkdownRequest(normalizedText);
+  if (pcMarkdownRequest) {
+    const result = createPcMarkdownFile(pcMarkdownRequest);
+    const origin = resolveXiaozhiDeliveryOrigin(headers);
+    contextMemory.rememberPcFile(result, origin);
+    const delivery = await routePcResultDelivery(result, origin);
+    return delivery.voiceSummary || result.replyText;
+  }
+
+  if (isLongRunningAgentTask(normalizedText)) {
+    return startLongRunningHermesTask(normalizedText, resolveXiaozhiDeliveryOrigin(headers));
+  }
+
+  const brainIntent = buildJarvisBrainIntent({ text: normalizedText });
+  if (brainIntent.type !== "agent_task") {
+    const deviceId = resolveXiaozhiDeviceId(headers);
+    const roomId = resolveXiaozhiRoomId(headers, deviceId);
+    const xiaozhiAllowsReal = parseBooleanEnv(process.env.JARVIS_XIAOZHI_ALLOW_REAL || process.env.JARVIS_MCP_ALLOW_REAL);
+    const result = await processJarvisUtterancePayload({
+      deviceId,
+      roomId,
+      wakeSessionId: resolveXiaozhiSessionId(headers),
+      trigger: "xiaozhi_llm",
+      text: normalizedText,
+      dryRun: !xiaozhiAllowsReal,
+    });
+    return formatJarvisVoiceResultForChat(result);
+  }
+
+  const hermesResult = await callHermesSlowPath({
+    text: normalizedText,
+    wakeSessionId: resolveXiaozhiSessionId(headers),
+  });
+  if (!hermesResult) return "Hermes 现在还没有配置好，我暂时不能处理这个非家居任务。";
+  return hermesResult.replyText || "Hermes 已处理完成。";
+}
+
+function formatJarvisVoiceResultForChat(result) {
+  if (result?.speak === false && result?.status === "duplicate_ignored") return "这句我刚刚已经处理过了。";
+  return result?.delivery?.voiceSummary || result?.replyText || result?.display || "Jarvis 已处理完成。";
+}
+
+async function maybeReplyWithTaskStatus(text, headers = {}, originOverride = null) {
+  if (!looksLikeTaskStatusRequest(text)) return "";
+  const tasks = taskRuntime.listTasks({ limit: 5, includeTerminal: true });
+  if (tasks.length === 0) return "目前没有正在跟踪的 Jarvis 任务。";
+  const latest = tasks[0];
+  const statusText = taskStatusText(latest.status);
+  const summary = latest.resultSummary || latest.progressSummary || latest.error || latest.userIntent;
+  const reply = `${latest.kind === "long_running_agent_task" ? "刚才那个任务" : "最近的任务"}${statusText}：${summary}`;
+  await deliveryRouter.route({
+    taskId: latest.taskId,
+    origin: originOverride || resolveXiaozhiDeliveryOrigin(headers),
+    voiceSummary: reply,
+    channels: ["voice"],
+    priority: "normal",
+    source: "task_status_query",
+  });
+  return reply;
+}
+
+async function maybeReplyWithContextMemory(text, origin) {
+  const answer = contextMemory.answer(text);
+  if (!answer?.handled) return null;
+  const taskId = answer.item?.path || answer.item?.taskId || answer.type;
+  const delivery = await deliveryRouter.route({
+    taskId,
+    origin,
+    voiceSummary: answer.replyText,
+    wechatTitle: answer.type === "pc_file_location" ? "Jarvis 文件位置" : "Jarvis 上下文回复",
+    wechatBody: answer.replyText,
+    channels: ["voice", "wechat"],
+    priority: "normal",
+    source: "context_memory",
+  });
+  return {
+    type: answer.type,
+    taskId,
+    replyText: delivery.voiceSummary || answer.replyText,
+    delivery,
+  };
+}
+
+async function startLongRunningHermesTask(text, origin) {
+  const task = taskRuntime.createTask({
+    source: "xiaozhi_llm",
+    kind: "long_running_agent_task",
+    userIntent: text,
+    status: "queued",
+    progressSummary: "我已经把这个长任务排进 Jarvis 后台。",
+    origin,
+    subagent: {
+      enabled: isSubagentConfigured(process.env),
+      runner: process.env.JARVIS_SUBAGENT_COMMAND || (String(process.env.HERMES_API_TRANSPORT || "").trim().toLowerCase() === "cli" ? "hermes_cli" : "hermes_api"),
+      status: "queued",
+    },
+  });
+  contextMemory.rememberTask(task);
+  const voiceSummary = "好，我开始处理。这个可能要花几分钟，我会在关键节点告诉你进度。";
+  await deliveryRouter.route({
+    taskId: task.taskId,
+    origin,
+    voiceSummary,
+    wechatTitle: "Jarvis 长任务已开始",
+    wechatBody: `任务：${text}\n任务 ID：${task.taskId}`,
+    channels: ["voice", "wechat"],
+    priority: "normal",
+    source: "task_runtime",
+  });
+  runHermesLongTaskInBackground(task.taskId, text, origin);
+  return voiceSummary;
+}
+
+function runHermesLongTaskInBackground(taskId, text, origin) {
+  setTimeout(async () => {
+    try {
+      const running = taskRuntime.updateTask(taskId, {
+        status: "running",
+        progressSummary: isSubagentConfigured(process.env) ? "Jarvis subagent 已开始处理这个长任务。" : "Hermes 已开始处理这个长任务。",
+        subagent: {
+          enabled: isSubagentConfigured(process.env),
+          id: taskId,
+          runner: process.env.JARVIS_SUBAGENT_COMMAND || (String(process.env.HERMES_API_TRANSPORT || "").trim().toLowerCase() === "cli" ? "hermes_cli" : "hermes_api"),
+          status: "running",
+          startedAt: new Date().toISOString(),
+        },
+      });
+      contextMemory.rememberTask(running);
+      const timeoutMs = configuredLongTaskTimeoutMs();
+      const subagentResult = await runConfiguredSubagentTask({
+        taskId,
+        text,
+        origin,
+        timeoutMs,
+      });
+      if (subagentResult) {
+        if (subagentResult.status !== "completed") {
+          const failed = taskRuntime.updateTask(taskId, {
+            status: "failed",
+            error: subagentResult.error || "Jarvis subagent 执行失败。",
+            subagent: subagentResult,
+          });
+          contextMemory.rememberTask(failed);
+          await routeTaskCompletionDelivery(failed, origin);
+          return;
+        }
+        const completed = taskRuntime.updateTask(taskId, {
+          status: "completed",
+          resultSummary: summarizeSpeakableContent(subagentResult.resultSummary || "Jarvis subagent 已完成任务。"),
+          artifacts: subagentResult.artifacts,
+          subagent: subagentResult,
+        });
+        contextMemory.rememberTask(completed);
+        await routeTaskCompletionDelivery(completed, origin);
+        return;
+      }
+
+      const result = await callHermesSlowPath({
+        text,
+        wakeSessionId: origin.wakeSessionId || taskId,
+      }, { timeoutMs });
+      if (!result || result.status === "brain_timeout" || result.status === "brain_unavailable") {
+        const failed = taskRuntime.updateTask(taskId, {
+          status: "failed",
+          error: result?.replyText || "Hermes 长任务执行失败。",
+          subagent: {
+            enabled: false,
+            id: taskId,
+            runner: "hermes",
+            status: "failed",
+            error: result?.error || result?.replyText || "",
+            finishedAt: new Date().toISOString(),
+          },
+        });
+        contextMemory.rememberTask(failed);
+        await routeTaskCompletionDelivery(failed, origin);
+        return;
+      }
+      const completed = taskRuntime.updateTask(taskId, {
+        status: "completed",
+        resultSummary: summarizeSpeakableContent(result.replyText || "Hermes 已完成任务。"),
+        subagent: {
+          enabled: false,
+          id: taskId,
+          runner: "hermes",
+          status: "completed",
+          finishedAt: new Date().toISOString(),
+        },
+      });
+      contextMemory.rememberTask(completed);
+      await routeTaskCompletionDelivery(completed, origin);
+    } catch (error) {
+      const failed = taskRuntime.updateTask(taskId, {
+        status: "failed",
+        error: error.message || "Jarvis 长任务后台执行异常。",
+        subagent: {
+          enabled: isSubagentConfigured(process.env),
+          id: taskId,
+          runner: process.env.JARVIS_SUBAGENT_COMMAND || "hermes",
+          status: "failed",
+          error: error.message || "",
+          finishedAt: new Date().toISOString(),
+        },
+      });
+      contextMemory.rememberTask(failed);
+      await routeTaskCompletionDelivery(failed, origin);
+    }
+  }, 0);
+}
+
+async function routeTaskCompletionDelivery(task, origin) {
+  if (!task) return;
+  const ok = task.status === "completed";
+  const voiceSummary = ok
+    ? `任务完成了：${task.resultSummary || "Hermes 已处理完成。"}`
+    : `任务没有完成：${task.error || "Hermes 执行失败。"}。`;
+  await deliveryRouter.route({
+    taskId: task.taskId,
+    origin,
+    voiceSummary,
+    wechatTitle: ok ? "Jarvis 长任务完成" : "Jarvis 长任务失败",
+    wechatBody: [
+      `任务：${task.userIntent}`,
+      task.resultSummary ? `结果：${task.resultSummary}` : "",
+      task.error ? `错误：${task.error}` : "",
+    ].filter(Boolean).join("\n"),
+    channels: ["voice", "wechat"],
+    priority: ok ? "normal" : "high",
+    source: "task_runtime",
+  });
+}
+
+function looksLikeTaskStatusRequest(text = "") {
+  const value = String(text || "").replace(/[，。！？,.!?\s]/g, "");
+  return /(刚才|上个|那个|任务|app|应用|项目).*(做到哪|进度|怎么样|完成了吗|好了没|状态)/.test(value)
+    || /(做到哪|进度怎么样|任务状态|好了没|完成了吗)/.test(value);
+}
+
+function taskStatusText(status) {
+  if (status === "queued") return "还在排队";
+  if (status === "running") return "正在处理";
+  if (status === "waiting_input") return "需要你补充信息";
+  if (status === "completed") return "已经完成";
+  if (status === "failed") return "失败了";
+  if (status === "cancelled") return "已取消";
+  return "状态未知";
+}
+
+function configuredLongTaskTimeoutMs() {
+  const value = Number(process.env.JARVIS_LONG_TASK_HERMES_TIMEOUT_MS ?? process.env.HERMES_LONG_TASK_TIMEOUT_MS ?? 120000);
+  return Number.isFinite(value) && value > 0 ? value : 120000;
+}
+
+async function maybeGetSemanticPlanCacheDraft(utterance) {
+  if (!shouldUseSemanticPlanningCache()) return null;
+  if (!homeAssistantAdapter.isConfigured()) return null;
+  try {
+    const home = await discoverCurrentHcmHome();
+    const lookup = semanticPlanningCache.lookup(utterance.text, {
+      homeSignature: homeSignatureFromHome(home),
+      currentRoomId: utterance.roomId,
+    });
+    if (!lookup.hit || !lookup.plannerDraft) return null;
+    return {
+      cacheId: lookup.entry.id,
+      reason: lookup.reason,
+      confidence: lookup.confidence,
+      plannerDraft: {
+        ...lookup.plannerDraft,
+        _source: "semantic_planning_cache",
+        _cacheId: lookup.entry.id,
+        _cacheConfidence: lookup.confidence,
+      },
+    };
+  } catch (error) {
+    console.warn(`[semantic-cache] lookup failed: ${error.message}`);
+    return null;
+  }
+}
+
+async function recordSemanticPlanCacheFromHcm({
+  utterance,
+  hcmResult,
+  plannerDraft,
+  source = "",
+  cacheHit = null,
+} = {}) {
+  if (!shouldUseSemanticPlanningCache()) return;
+  try {
+    if (cacheHit?.cacheId) {
+      semanticPlanningCache.recordCacheOutcome(cacheHit.cacheId, {
+        ok: successfulCacheExecutionStatus(hcmResult?.status),
+        auditEntry: hcmResult?.trace,
+      });
+      return;
+    }
+    if (!recordableHcmStatus(hcmResult?.status)) return;
+    if (!plannerDraft) return;
+    const home = await discoverCurrentHcmHome();
+    semanticPlanningCache.recordSuccess(utterance.text, {
+      plannerDraft,
+      auditEntry: hcmResult?.trace,
+      homeSignature: homeSignatureFromHome(home),
+      source,
+    });
+  } catch (error) {
+    console.warn(`[semantic-cache] record failed: ${error.message}`);
+  }
+}
+
+function shouldUseSemanticPlanningCache() {
+  const value = String(process.env.JARVIS_SEMANTIC_CACHE_ENABLED ?? "true").trim().toLowerCase();
+  return !["0", "false", "off", "disabled", "no"].includes(value);
+}
+
+function parsePcMarkdownRequest(text) {
+  const value = String(text || "").trim();
+  if (!value) return null;
+  const wantsMarkdown = /(^|[^a-z])md([^a-z]|$)|markdown|\.md/i.test(value);
+  const wantsFile = /文件|文档|笔记|文本|便签|记录/.test(value);
+  const wantsWrite = /新建|创建|建立|生成|写入|保存|建一个|建个/.test(value);
+  if ((!wantsMarkdown && !wantsFile) || !wantsWrite) return null;
+  return {
+    filename: extractMarkdownFilename(value),
+    content: extractMarkdownContent(value),
+    overwrite: /覆盖|重写|重新写|更新/.test(value),
+  };
+}
+
+function extractMarkdownFilename(text) {
+  const raw = String(text || "");
+  const explicitAscii = raw.match(/([A-Za-z0-9_-]+\.md)/i);
+  if (explicitAscii?.[1]) return explicitAscii[1];
+
+  const compact = String(text || "").replace(/\s+/g, "");
+
+  const named = compact.match(/(?:叫做|叫|名为|名字叫|文件名(?:为|叫)?)([A-Za-z0-9_\-\u4e00-\u9fa5]+)(?:的)?(?:MD|md|Markdown|markdown)/i);
+  const namedStem = normalizeMarkdownFilenameStem(named?.[1]);
+  if (namedStem) return `${namedStem}.md`;
+
+  const createNamed = compact.match(/(?:新建|创建|建立|生成)(?:一个|个)?([A-Za-z0-9_\-\u4e00-\u9fa5]+)(?:的)?(?:MD|md|Markdown|markdown)/i);
+  const createStem = normalizeMarkdownFilenameStem(createNamed?.[1]);
+  if (createStem) return `${createStem}.md`;
+
+  const createFileNamed = compact.match(/(?:新建|创建|建立|生成)(?:一个|个)?([A-Za-z0-9_\-\u4e00-\u9fa5]+?)(?:的)?(?:文件|文档|笔记|文本|便签|记录)/i);
+  const createFileStem = normalizeMarkdownFilenameStem(createFileNamed?.[1]);
+  if (createFileStem) return `${createFileStem}.md`;
+
+  return "hello.md";
+}
+
+function normalizeMarkdownFilenameStem(stem) {
+  const value = String(stem || "").trim().replace(/的$/, "");
+  if (!value || ["一个", "个", "文件", "文档", "文本", "笔记", "便签", "记录", "md", "markdown"].includes(value.toLowerCase())) return "";
+  return value;
+}
+
+function extractMarkdownContent(text) {
+  const quoted = String(text).match(/(?:写入|内容是|内容为|保存)[：:\s]*[“"']([^”"']+)[”"']/);
+  if (quoted?.[1]?.trim()) return normalizeSpokenFileContent(quoted[1].trim());
+  const inline = String(text).match(/(?:写入|内容是|内容为|保存)[：:\s]*([^，。！？!?,]+)/);
+  if (inline?.[1]?.trim()) return normalizeSpokenFileContent(inline[1].trim());
+  if (/helloworld/i.test(text)) return "helloworld";
+  if (/hello\s*world|hello\s*word/i.test(text)) return "helloworld";
+  return "helloworld";
+}
+
+function normalizeSpokenText(text) {
+  const value = String(text || "").trim();
+  if (!value.startsWith("{") || !value.endsWith("}")) return normalizeVoiceAsrText(value);
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed.content === "string" && parsed.content.trim()) return normalizeVoiceAsrText(parsed.content);
+  } catch {
+    // Keep the original text if it is not a JSON ASR wrapper.
+  }
+  return normalizeVoiceAsrText(value);
+}
+
+function normalizeSpokenFileContent(content) {
+  const value = String(content || "").trim();
+  if (/^hello\s*world$/i.test(value) || /^hello\s*word$/i.test(value) || /^helloworld$/i.test(value)) return "helloworld";
+  return value;
+}
+
+function extractChatCompletionUserText(messages) {
+  if (!Array.isArray(messages)) return "";
+  const userMessages = messages.filter((message) => message?.role === "user");
+  const last = userMessages.at(-1);
+  return extractChatMessageContent(last?.content).trim();
+}
+
+function extractChatMessageContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => {
+    if (typeof part === "string") return part;
+    if (part?.type === "text" && typeof part.text === "string") return part.text;
+    if (typeof part?.text === "string") return part.text;
+    return "";
+  }).join("\n");
+}
+
+function resolveXiaozhiDeviceId(headers = {}) {
+  return String(
+    process.env.JARVIS_XIAOZHI_DEVICE_ID
+    || headers["device-id"]
+    || headers["x-device-id"]
+    || headers["client-id"]
+    || headers["x-client-id"]
+    || "stackchan-xiaozhi",
+  ).trim();
+}
+
+function resolveXiaozhiRoomId(headers = {}, deviceId = "") {
+  return String(
+    process.env.JARVIS_XIAOZHI_ROOM_ID
+    || headers["room-id"]
+    || headers["x-room-id"]
+    || stackchanDeviceRooms.get(deviceId)
+    || "",
+  ).trim();
+}
+
+function resolveXiaozhiSessionId(headers = {}) {
+  const explicit = String(
+    headers["x-session-id"]
+    || headers["session-id"]
+    || headers["x-conversation-id"]
+    || "",
+  ).trim();
+  if (explicit) return explicit;
+  const deviceId = resolveXiaozhiDeviceId(headers);
+  return `xiaozhi:${deviceId || "stackchan-xiaozhi"}`;
+}
+
+function resolveXiaozhiDeliveryOrigin(headers = {}) {
+  const deviceId = resolveXiaozhiDeviceId(headers);
+  return {
+    ingress: "xiaozhi_llm",
+    trigger: "xiaozhi_llm",
+    sourceDeviceId: deviceId,
+    roomId: resolveXiaozhiRoomId(headers, deviceId),
+    wakeSessionId: resolveXiaozhiSessionId(headers),
+  };
+}
+
+function sendOpenAiChatCompletionStream(response, completion) {
+  const choice = completion.choices?.[0];
+  const content = choice?.message?.content || "";
+  const base = {
+    id: completion.id,
+    object: "chat.completion.chunk",
+    created: completion.created,
+    model: completion.model,
+  };
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+  });
+  response.write(`data: ${JSON.stringify({
+    ...base,
+    choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }],
+  })}\n\n`);
+  response.write(`data: ${JSON.stringify({
+    ...base,
+    choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+  })}\n\n`);
+  response.write("data: [DONE]\n\n");
+  response.end();
+}
+
+function formatMcpToolReplyText(result) {
+  if (result?.status === "dry_run") {
+    return `没有打开真实设备：当前是 dry-run 预览模式。${result.replyText || result.display || ""}`.trim();
+  }
+  return result?.replyText || result?.display || JSON.stringify(result);
+}
+
+function buildMcpToolText(toolName, args = {}) {
+  const explicitText = String(args.text ?? "").trim();
+  if (explicitText) return explicitText;
+
+  const target = String(args.target ?? args.name ?? args.device ?? args.entity ?? "").trim();
+  const room = String(args.room ?? "").trim();
+  if (!target) return "";
+  const targetText = target.includes(room) ? target : `${room}${target}`;
+  if (toolName === "turn_on_home_device") return `打开${targetText}`;
+  if (toolName === "turn_off_home_device") return `关闭${targetText}`;
+  if (toolName === "get_home_device_state") return `${targetText}开着吗`;
+  return targetText;
+}
+
+function validateMcpBridgePolicy({ text, roomId }) {
+  validateAllowedTexts(text, process.env.JARVIS_MCP_ALLOWED_TEXTS, "MCP bridge");
+  const allowedRooms = String(process.env.JARVIS_MCP_ALLOWED_ROOM_IDS || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (allowedRooms.length && !allowedRooms.includes(String(roomId || "").trim())) {
+    throw statusError(`MCP bridge rejected roomId ${roomId || "(empty)"}`, 403);
+  }
+  const requiredPattern = String(process.env.JARVIS_MCP_REQUIRE_TEXT_PATTERN || "").trim();
+  if (requiredPattern) {
+    const pattern = new RegExp(requiredPattern);
+    if (!pattern.test(text)) throw statusError("MCP bridge rejected utterance outside the allowed text pattern", 403);
+  }
+}
+
+function validateJarvisIngressPolicy({ text, roomId, deviceId }) {
+  validateAllowedTexts(text, process.env.JARVIS_INGRESS_ALLOWED_TEXTS, "Jarvis ingress");
+  const allowedDevices = String(process.env.JARVIS_INGRESS_ALLOWED_DEVICE_IDS || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (allowedDevices.length && !allowedDevices.includes(String(deviceId || "").trim())) {
+    throw statusError(`Jarvis ingress rejected deviceId ${deviceId || "(empty)"}`, 403);
+  }
+
+  const allowedRooms = String(process.env.JARVIS_INGRESS_ALLOWED_ROOM_IDS || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (allowedRooms.length && !allowedRooms.includes(String(roomId || "").trim())) {
+    throw statusError(`Jarvis ingress rejected roomId ${roomId || "(empty)"}`, 403);
+  }
+
+  const requiredPattern = String(process.env.JARVIS_INGRESS_REQUIRE_TEXT_PATTERN || "").trim();
+  if (requiredPattern) {
+    const pattern = new RegExp(requiredPattern);
+    if (!pattern.test(text)) throw statusError("Jarvis ingress rejected utterance outside the allowed text pattern", 403);
+  }
+}
+
+function validateAllowedTexts(text, rawAllowedTexts, label) {
+  const allowedTexts = String(rawAllowedTexts || "")
+    .split("|")
+    .map((item) => normalizeGuardText(item))
+    .filter(Boolean);
+  if (allowedTexts.length === 0) return;
+  const normalizedText = normalizeGuardText(text);
+  if (!allowedTexts.includes(normalizedText)) {
+    throw statusError(`${label} rejected utterance outside the exact allowed text list`, 403);
+  }
+}
+
+function normalizeGuardText(text) {
+  return String(text || "")
+    .replace(/[。！？!?,，.\s]/g, "")
+    .trim();
+}
+
+function mcpResult(id, result) {
+  return { jsonrpc: "2.0", id, result };
+}
+
+function mcpError(id, code, message) {
+  return { jsonrpc: "2.0", id, error: { code, message } };
+}
+
+function statusError(message, statusCode) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function parseBooleanEnv(value) {
+  return ["1", "true", "yes", "on", "enabled", "real"].includes(String(value ?? "").trim().toLowerCase());
 }
 
 function findRecentVoiceUtterance(dedupeKey) {
@@ -967,6 +2187,34 @@ function applyTrustedStackChanRoom(utterance) {
     reportedRoomId: utterance.roomId || "",
     roomId: trustedRoomId,
   };
+}
+
+function applyTrustedRoomTextDefaults(utterance) {
+  const roomLabel = trustedRoomSpeechLabel(utterance.roomId);
+  if (!roomLabel || hasSpecificRoomReference(utterance.text)) return utterance;
+  const expandedText = prefixImplicitRoomDevice(utterance.text, roomLabel);
+  if (expandedText === utterance.text) return utterance;
+  return {
+    ...utterance,
+    originalText: utterance.originalText || utterance.text,
+    text: expandedText,
+  };
+}
+
+function trustedRoomSpeechLabel(roomId) {
+  if (roomId === "second") return "次卧";
+  return "";
+}
+
+function prefixImplicitRoomDevice(text, roomLabel) {
+  const value = String(text || "").trim();
+  if (!/^(打开|开启|关闭|关掉|关上|把|请问|查询|看看|看一下)?(一下|下|那个|这个)?(吸顶灯|入户射灯|床头右射灯|床头左射灯|床头射灯|床尾射灯|射灯)/.test(value)) {
+    return value;
+  }
+  return value.replace(
+    /^(打开|开启|关闭|关掉|关上|把|请问|查询|看看|看一下)?(一下|下|那个|这个)?(?=(吸顶灯|入户射灯|床头右射灯|床头左射灯|床头射灯|床尾射灯|射灯))/,
+    `$1$2${roomLabel}`,
+  );
 }
 
 function rememberVoiceUtterance(dedupeKey, utterance) {
@@ -1066,13 +2314,18 @@ async function applyLearningFeedbackRequest(payload) {
   };
 }
 
-async function callHermesSlowPath(utterance) {
+async function callHermesSlowPath(utterance, { timeoutMs: overrideTimeoutMs } = {}) {
+  if (String(process.env.HERMES_API_TRANSPORT || "").trim().toLowerCase() === "cli") {
+    return callHermesCliOneShot(utterance, { timeoutMs: overrideTimeoutMs });
+  }
   const baseUrl = process.env.HERMES_API_BASE_URL || process.env.HERMES_API_URL;
   const apiKey = process.env.HERMES_API_KEY || process.env.API_SERVER_KEY;
   if (!baseUrl) return null;
   const startedAt = Date.now();
   const configuredTimeoutMs = Number(process.env.HERMES_API_TIMEOUT_MS ?? 3500);
-  const timeoutMs = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : 3500;
+  const timeoutMs = Number.isFinite(overrideTimeoutMs) && overrideTimeoutMs > 0
+    ? overrideTimeoutMs
+    : Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : 3500;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -1127,6 +2380,91 @@ async function callHermesSlowPath(utterance) {
   }
 }
 
+async function callHermesCliOneShot(utterance, { timeoutMs: overrideTimeoutMs } = {}) {
+  const startedAt = Date.now();
+  const configuredTimeoutMs = Number(process.env.HERMES_API_TIMEOUT_MS ?? 15000);
+  const timeoutMs = Number.isFinite(overrideTimeoutMs) && overrideTimeoutMs > 0
+    ? overrideTimeoutMs
+    : Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : 15000;
+  const python = process.env.HERMES_CLI_PYTHON || "/Users/jerf/.hermes/hermes-agent/venv/bin/python";
+  const hermesHome = process.env.HERMES_HOME || "/Users/jerf/.hermes";
+  const hermesAgentRoot = process.env.HERMES_AGENT_ROOT || "/Users/jerf/.hermes/hermes-agent";
+  const model = process.env.HERMES_API_MODEL || "";
+  const args = ["-m", "hermes_cli.main", "--oneshot", utterance.text];
+  if (model && model !== "jarvis") args.push("--model", model);
+  return new Promise((resolve) => {
+    const child = spawn(python, args, {
+      cwd: process.cwd(),
+      env: buildHermesCliEnv({ hermesHome, hermesAgentRoot }),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(hermesFallbackResult({
+        status: "brain_unavailable",
+        replyText: "Hermes 本地命令暂时不可用，我先不继续处理这个问题。",
+        latencyMs: Date.now() - startedAt,
+        error: error.message,
+      }));
+    });
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (signal === "SIGTERM") {
+        resolve(hermesFallbackResult({
+          status: "brain_timeout",
+          replyText: "Hermes 慢路径响应超时了，我先不继续处理这个问题。",
+          latencyMs: Date.now() - startedAt,
+          error: `Hermes CLI timed out after ${timeoutMs}ms`,
+        }));
+        return;
+      }
+      if (code !== 0) {
+        resolve(hermesFallbackResult({
+          status: "brain_unavailable",
+          replyText: "Hermes 慢路径现在暂时不可用，我先不继续处理这个问题。",
+          latencyMs: Date.now() - startedAt,
+          error: stderr.trim() || `Hermes CLI exited ${code}`,
+        }));
+        return;
+      }
+      resolve({
+        status: "answered",
+        replyText: stdout.trim() || "Hermes 没有返回可播报内容。",
+        latencyMs: Date.now() - startedAt,
+      });
+    });
+  });
+}
+
+function buildHermesCliEnv({ hermesHome, hermesAgentRoot }) {
+  return {
+    HOME: process.env.HOME,
+    PATH: process.env.PATH,
+    LANG: process.env.LANG || "C.UTF-8",
+    LC_ALL: process.env.LC_ALL || "C.UTF-8",
+    HERMES_HOME: hermesHome,
+    PYTHONPATH: hermesAgentRoot,
+    TERM: "dumb",
+    NO_COLOR: "1",
+  };
+}
+
 function hermesFallbackResult({ status, replyText, latencyMs, error }) {
   return {
     status,
@@ -1134,6 +2472,184 @@ function hermesFallbackResult({ status, replyText, latencyMs, error }) {
     latencyMs,
     error,
   };
+}
+
+async function maybeBuildHermesHomeIntentDraft(utterance) {
+  if (!shouldUseHermesHomeIntentPlanner()) return null;
+  const baseUrl = process.env.HERMES_HOME_INTENT_API_BASE_URL || process.env.HERMES_API_BASE_URL || process.env.HERMES_API_URL;
+  if (!baseUrl || !activeProviderAdapter.isConfigured()) return null;
+  const startedAt = Date.now();
+  const timeoutMs = configuredHermesHomeIntentTimeoutMs();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const home = await discoverCurrentHcmHome();
+    const devices = compileHcmForPlanner(home, {
+      input: utterance.text,
+      currentRoomId: utterance.roomId,
+      selectedRoomId: utterance.roomId,
+      limit: 200,
+    });
+    const contextPack = buildPromptContextPackV2({
+      input: utterance.text,
+      home,
+      devices,
+      currentRoomId: utterance.roomId,
+      selectedRoomId: utterance.roomId,
+      personalSemantics: await compilePersonalSemanticsForPlanner(utterance.text, home),
+      learningContext: await compileHouseholdLearningContext(readLearningMemory(), { input: utterance.text, home }),
+      conversation: conversationContextStore.get(utterance.wakeSessionId || utterance.deviceId),
+    });
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(process.env.HERMES_HOME_INTENT_API_KEY || process.env.HERMES_API_KEY || process.env.API_SERVER_KEY
+          ? { Authorization: `Bearer ${process.env.HERMES_HOME_INTENT_API_KEY || process.env.HERMES_API_KEY || process.env.API_SERVER_KEY}` }
+          : {}),
+      },
+      body: JSON.stringify({
+        model: process.env.HERMES_HOME_INTENT_MODEL || process.env.HERMES_API_MODEL || "jarvis",
+        temperature: 0,
+        max_tokens: 1200,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: buildHermesHomeIntentSystemPrompt(),
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              input: utterance.text,
+              deviceId: utterance.deviceId,
+              currentRoomId: utterance.roomId || null,
+              selectedRoomId: utterance.roomId || null,
+              hcm_context: contextPack,
+              devices,
+            }),
+          },
+        ],
+      }),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      console.warn(`[hermes-home-intent] HTTP ${response.status}: ${text.slice(0, 200)}`);
+      return null;
+    }
+    const content = JSON.parse(text).choices?.[0]?.message?.content;
+    if (!content) return null;
+    const draft = parseJsonContent(content);
+    validatePlannerDraft(draft);
+    return {
+      ...draft,
+      summary: draft.summary || utterance.text,
+      _source: "hermes_home_intent",
+      _latencyMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    if (error.name !== "AbortError") console.warn(`[hermes-home-intent] ${error.message}`);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function shouldUseHermesHomeIntentPlanner() {
+  const explicit = process.env.JARVIS_HOME_INTENT_PLANNER ?? process.env.JARVIS_HERMES_HOME_INTENT;
+  const mode = String(explicit || "").trim().toLowerCase();
+  if (["off", "false", "0", "disabled", "none", "local"].includes(mode)) return false;
+  if (["hermes", "true", "1", "on", "auto"].includes(mode)) return true;
+  return Boolean(process.env.HERMES_HOME_INTENT_API_BASE_URL || process.env.HERMES_API_BASE_URL || process.env.HERMES_API_URL);
+}
+
+function configuredHermesHomeIntentTimeoutMs() {
+  const value = Number(process.env.JARVIS_HOME_INTENT_TIMEOUT_MS ?? process.env.HERMES_HOME_INTENT_TIMEOUT_MS ?? 2500);
+  return Number.isFinite(value) && value > 0 ? value : 2500;
+}
+
+function buildHermesHomeIntentSystemPrompt() {
+  return [
+    "你是 Jarvis 的 Hermes Brain 家居意图规划器。",
+    "你只负责理解用户自然语言并输出 HCM-level JSON，不允许直接控制 Home Assistant，不允许编造设备、房间或能力。",
+    "你会收到完整 HCM 上下文，包括房间、设备、别名、状态、能力、会话焦点和安全策略。",
+    "显式房间优先；如果用户明确说主卧，就不要因为 StackChan 在次卧而改成次卧。没有显式房间时，可以参考 currentRoomId、selectedRoomId 和 conversation。",
+    "中文口语词、语气词、ASR 小错误要按上下文理解，但不确定时必须 needs_confirmation=true 且不给 actions。",
+    "返回严格 JSON，使用 HCM device id / capability id 或 target/room_id 语义动作，Provider service call 由 HCM 编译。",
+    "JSON 形状：",
+    '{"intent_type":"device_control|scene|state_query|inventory_query|unknown","intent":"string","confidence":0.0,"summary":"中文短句","needs_confirmation":false,"query":{"mode":"state|count|list","device_id":"可空","target":"可空","room_id":"可空","reason":"中文短句"},"actions":[{"device_id":"可空","target":"可空","room_id":"可空","capability":"power 或 HCM capability id","value":true,"reason":"中文短句"}],"intent_frame":{"intent_type":"device_control|scene|state_query|inventory_query|unknown","intent":"string","confidence":0.0,"goal":{"domain":"lighting|climate|media|cover|general","desired_outcome":"string","space_refs":[],"target_refs":[],"constraints":[]},"grounding":{"required_facts":[],"candidate_targets":[]},"ambiguity":{"level":"low|medium|high","needs_clarification":false,"ambiguous_terms":[],"alternatives":[]},"decision":{"mode":"execute|answer|ask_clarification|no_action","reason":"中文短句"}}}',
+  ].join("\n");
+}
+
+function applyConversationFocusToExternalDraft(draft, { input = "", conversation } = {}) {
+  if (!draft || !Array.isArray(draft.actions) || draft.actions.length === 0) return draft;
+  if (!shouldUseConversationFocusForExternalDraft(input, conversation)) return draft;
+  let changed = false;
+  const focusedTargets = conversation.focusedTargets ?? [];
+  const focusedRooms = conversation.focusedRooms ?? [];
+  const actions = draft.actions.flatMap((action) => {
+    if (action?.device_id || action?.thingId) return [action];
+    const matchedTargets = matchingFocusedTargetsForAction(action, input, focusedTargets);
+    if (matchedTargets.length > 0) {
+      changed = true;
+      return matchedTargets.map((target) => ({
+        ...action,
+        device_id: target.id,
+        target: target.name,
+        room_id: target.roomId || action.room_id,
+        reason: action.reason || `${target.name} 来自上一轮对话焦点`,
+      }));
+    }
+    if (focusedRooms.length === 1 && !action.room_id) {
+      changed = true;
+      return [{
+        ...action,
+        room_id: focusedRooms[0].id,
+        reason: action.reason || `${focusedRooms[0].name || focusedRooms[0].id} 来自上一轮对话焦点`,
+      }];
+    }
+    return [action];
+  });
+  return changed ? { ...draft, actions } : draft;
+}
+
+function shouldUseConversationFocusForExternalDraft(input = "", conversation = null) {
+  if (!conversation) return false;
+  if (hasSpecificRoomReference(input)) return false;
+  const hasFocus = (conversation.focusedTargets?.length ?? 0) > 0 || (conversation.focusedRooms?.length ?? 0) > 0;
+  if (!hasFocus) return false;
+  return isReferentialControlInput(input) || isRoomScopedFollowUpInput(input) || looksLikeShortLightFollowUp(input);
+}
+
+function matchingFocusedTargetsForAction(action = {}, input = "", focusedTargets = []) {
+  if (!Array.isArray(focusedTargets) || focusedTargets.length === 0) return [];
+  const targetRef = normalizeConversationFocusTarget(action.target || action.name || input);
+  if (!targetRef || /^(灯|照明|它|这个|那个)$/.test(targetRef)) return focusedTargets;
+  const matches = focusedTargets.filter((target) => {
+    const targetName = normalizeConversationFocusText(target.name);
+    return targetName.includes(targetRef) || targetRef.includes(targetName);
+  });
+  return matches.length > 0 ? matches : [];
+}
+
+function looksLikeShortLightFollowUp(input = "") {
+  const text = normalizeConversationFocusText(input);
+  return /^(打开|开启|开|关闭|关掉|关上|关)(射灯|吊灯|灯带|台灯|主灯|吸顶灯|筒灯|壁灯|落地灯|灯)(一下|下|吧|了)?$/.test(text)
+    || /^(射灯|吊灯|灯带|台灯|主灯|吸顶灯|筒灯|壁灯|落地灯|灯)(打开|开启|开|关闭|关掉|关上|关)(一下|下|吧|了)?$/.test(text);
+}
+
+function normalizeConversationFocusTarget(value = "") {
+  return normalizeConversationFocusText(value)
+    .replace(/^(请|麻烦|帮我|给我|替我|能不能|可以|把|将|那个|这个)+/, "")
+    .replace(/^(打开|开启|开一下|开下|开|关闭|关掉|关上|关一下|关下|关)/, "")
+    .replace(/(打开|开启|开一下|开下|开|关闭|关掉|关上|关一下|关下|关)$/, "")
+    .replace(/^(一下|下)+/, "")
+    .replace(/(一下|下|吧|了)$/, "");
+}
+
+function normalizeConversationFocusText(value = "") {
+  return String(value ?? "").trim().replace(/[，。！？,.!?\s]/g, "");
 }
 
 async function runHcmCommandPipeline(payload) {
@@ -1163,10 +2679,12 @@ async function runHcmCommandPipeline(payload) {
     const rawHome = await runCommandStage(trace, "context_snapshot", () => activeProviderAdapter.discoverHcmHome(), {
       summarize: (home) => ({ things: home.stats?.thingCount, capabilities: home.stats?.capabilityCount }),
     });
-    const home = await runCommandStage(trace, "policy_overlay", async () => applyPersonalSemanticsToThingAliases(applyHcmOverlay(rawHome, readHcmOverlay())), {
+    const home = await runCommandStage(trace, "semantic_overlay", async () => applyRuntimeHomeSemantics(rawHome), {
       summarize: (home) => ({
         autoExecutable: home.stats.autoExecutableCapabilities,
         protected: home.stats.unresolvedBindingCount,
+        spatial: Boolean(home.spatialSemantic?.applied),
+        spatialAssets: home.spatialSemantic?.assignedAssetCount ?? 0,
       }),
     });
     const contextAgent = await runCommandStage(trace, "context_agent", async () => runContextAgent({ home }), {
@@ -1239,19 +2757,24 @@ async function runHcmCommandPipeline(payload) {
     // This eliminates the second LLM call (~3.5s) when the caller has already
     // understood the intent. Safety Gate, Policy Gate, Decision Review, and
     // Provider Simulation still run — only the LLM planner is skipped.
-    const useExternalDraft = Boolean(payload.skipPlanner) && payload.plannerDraft;
+    const homeIntentDraft = payload.homeIntent ? createPlannerDraftFromHomeIntent(payload.homeIntent) : null;
+    const externalPlannerDraft = applyConversationFocusToExternalDraft(payload.plannerDraft ?? homeIntentDraft, {
+      input: payload.input,
+      conversation,
+    });
+    const useExternalDraft = (Boolean(payload.skipPlanner) || Boolean(payload.homeIntent)) && externalPlannerDraft;
     const draft = useExternalDraft
       ? await runCommandStage(
           trace,
-          "planner_external",
-          () => payload.plannerDraft,
+          payload.homeIntent ? "brain_home_intent" : "planner_external",
+          () => externalPlannerDraft,
           {
             summarize: (draft) => ({
               intent: draft.intent,
               intentType: draft.intent_type ?? draft.intent_frame?.intent_type,
               frame: Boolean(draft.intent_frame),
               actionCount: draft.actions?.length ?? draft.intent_frame?.decision?.actions?.length ?? 0,
-              source: "external",
+              source: payload.homeIntent ? "jarvis_brain_home_intent" : payload.plannerDraftSource || "external",
             }),
           },
         )
@@ -1364,10 +2887,35 @@ async function runHcmCommandPipeline(payload) {
         }),
       },
     );
+    const entityScopedPolicyPlan = await runCommandStage(
+      trace,
+      "entity_scope_gate",
+      async () => applyAllowedEntityScope(policyPlan),
+      {
+        summarize: (scopedPlan) => ({
+          accepted: scopedPlan.accepted.length,
+          rejected: scopedPlan.rejected.length,
+          scopeEnabled: parseAllowedEntityIds().size > 0,
+        }),
+      },
+    );
+    const scopedPolicyPlan = await runCommandStage(
+      trace,
+      "action_room_scope_gate",
+      async () => applyAllowedActionRoomScope(entityScopedPolicyPlan),
+      {
+        summarize: (scopedPlan) => ({
+          accepted: scopedPlan.accepted.length,
+          rejected: scopedPlan.rejected.length,
+          scopeEnabled: parseAllowedActionRoomIds().size > 0,
+          allowedRooms: Array.from(parseAllowedActionRoomIds()),
+        }),
+      },
+    );
     const serviceSimulation = await runCommandStage(
       trace,
       "ha_service_simulator",
-      async () => simulateProviderExecutionPlan({ adapter: activeProviderAdapter, accepted: policyPlan.accepted, home }),
+      async () => simulateProviderExecutionPlan({ adapter: activeProviderAdapter, accepted: scopedPolicyPlan.accepted, home }),
       {
         summarize: (simulation) => ({
           ok: simulation.checks.filter((check) => check.ok).length,
@@ -1384,7 +2932,7 @@ async function runHcmCommandPipeline(payload) {
           input: payload.input,
           plan,
           executionPlan,
-          policyPlan,
+          policyPlan: scopedPolicyPlan,
           simulation: serviceSimulation,
         }),
       {
@@ -1400,8 +2948,8 @@ async function runHcmCommandPipeline(payload) {
       dryRun: effectiveDryRun,
       requestedDryRun: Boolean(payload.dryRun),
       executionMode,
-      accepted: policyPlan.accepted.map((item) => formatAcceptedExecution(item, serviceSimulation)),
-      rejected: [...policyPlan.rejected, ...serviceSimulation.rejected],
+      accepted: scopedPolicyPlan.accepted.map((item) => formatAcceptedExecution(item, serviceSimulation)),
+      rejected: [...scopedPolicyPlan.rejected, ...serviceSimulation.rejected],
       simulation: serviceSimulation,
       decisionReview,
       results: [],
@@ -1421,7 +2969,7 @@ async function runHcmCommandPipeline(payload) {
       execution.status = "no_action";
     } else if (plan.needsConfirmation) {
       execution.status = "needs_confirmation";
-    } else if (!policyPlan.ok) {
+    } else if (!scopedPolicyPlan.ok) {
       execution.status = "rejected";
     } else if (!serviceSimulation.ok) {
       execution.status = "rejected";
@@ -1517,7 +3065,7 @@ async function runHcmCommandPipeline(payload) {
 }
 
 async function buildAgentSnapshot() {
-  const home = applyPersonalSemanticsToThingAliases(applyHcmOverlay(await activeProviderAdapter.discoverHcmHome(), readHcmOverlay()));
+  const home = await discoverCurrentHcmHome();
   return runAgentRuntime({
     home,
     auditEntries: readCommandAuditEntries(20),
@@ -1690,7 +3238,7 @@ function formatAcceptedExecution(item, simulation) {
     thingName: item.action.logicalAssetName ?? item.action.thingName ?? item.thing.name,
     providerThingName: item.thing.name,
     logicalAssetId: item.action.logicalAssetId,
-    logicalRoomId: item.action.logicalRoomId,
+    logicalRoomId: item.action.logicalRoomId ?? item.thing.spaceId,
     capabilityId: item.capability.id,
     capabilityName: item.capability.name,
     value: item.action.value,
@@ -1704,6 +3252,128 @@ function formatAcceptedExecution(item, simulation) {
         }
       : null,
   };
+}
+
+function applyAllowedEntityScope(policyPlan) {
+  const allowedEntityIds = parseAllowedEntityIds();
+  if (allowedEntityIds.size === 0) return policyPlan;
+
+  const accepted = [];
+  const rejectedByScope = [];
+  for (const item of policyPlan.accepted ?? []) {
+    const entityId = extractExecutionEntityId(item);
+    if (entityId && allowedEntityIds.has(entityId)) {
+      accepted.push(item);
+      continue;
+    }
+    rejectedByScope.push({
+      ok: false,
+      code: "entity_outside_stage_scope",
+      message: `${item.thing?.name || item.action?.thingName || "目标"} 不在本阶段允许控制的实体白名单内`,
+      action: item.action,
+      thingId: item.thing?.id,
+      thingName: item.thing?.name,
+      capabilityId: item.capability?.id,
+      capabilityName: item.capability?.name,
+      entityId: entityId || null,
+    });
+  }
+
+  return {
+    ...policyPlan,
+    ok: accepted.length > 0,
+    accepted,
+    rejected: [...(policyPlan.rejected ?? []), ...rejectedByScope],
+    summary: {
+      ...(policyPlan.summary ?? {}),
+      acceptedCount: accepted.length,
+      rejectedCount: (policyPlan.rejected?.length ?? 0) + rejectedByScope.length,
+      policyCodes: [
+        ...(policyPlan.summary?.policyCodes ?? []),
+        ...rejectedByScope.map((item) => item.code),
+      ],
+    },
+  };
+}
+
+function parseAllowedEntityIds() {
+  return new Set(
+    String(process.env.JARVIS_ALLOWED_ENTITY_IDS || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
+  );
+}
+
+function extractExecutionEntityId(item) {
+  const direct = item?.serviceCall?.serviceData?.entity_id;
+  if (typeof direct === "string") return direct;
+  if (Array.isArray(direct)) return direct[0];
+  return item?.capability?.binding?.entityId || item?.capability?.binding?.entity_id || "";
+}
+
+function applyAllowedActionRoomScope(policyPlan) {
+  const allowedRoomIds = parseAllowedActionRoomIds();
+  if (allowedRoomIds.size === 0) return policyPlan;
+
+  const accepted = [];
+  const rejectedByScope = [];
+  for (const item of policyPlan.accepted ?? []) {
+    const roomIds = extractExecutionRoomIds(item);
+    if (roomIds.length > 0 && roomIds.every((roomId) => allowedRoomIds.has(roomId))) {
+      accepted.push(item);
+      continue;
+    }
+    rejectedByScope.push({
+      ok: false,
+      code: "action_room_outside_stage_scope",
+      message: `${item.thing?.name || item.action?.thingName || "目标"} 不在当前真实执行允许的房间范围内`,
+      action: item.action,
+      thingId: item.thing?.id,
+      thingName: item.thing?.name,
+      capabilityId: item.capability?.id,
+      capabilityName: item.capability?.name,
+      roomIds,
+      allowedRoomIds: Array.from(allowedRoomIds),
+    });
+  }
+
+  return {
+    ...policyPlan,
+    ok: accepted.length > 0,
+    accepted,
+    rejected: [...(policyPlan.rejected ?? []), ...rejectedByScope],
+    summary: {
+      ...(policyPlan.summary ?? {}),
+      acceptedCount: accepted.length,
+      rejectedCount: (policyPlan.rejected?.length ?? 0) + rejectedByScope.length,
+      policyCodes: [
+        ...(policyPlan.summary?.policyCodes ?? []),
+        ...rejectedByScope.map((item) => item.code),
+      ],
+    },
+  };
+}
+
+function parseAllowedActionRoomIds() {
+  return new Set(
+    String(process.env.JARVIS_ALLOWED_ACTION_ROOM_IDS || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
+  );
+}
+
+function extractExecutionRoomIds(item) {
+  const logicalRoomId = item?.action?.logicalRoomId;
+  if (typeof logicalRoomId === "string" && logicalRoomId.trim()) return [logicalRoomId.trim()];
+  return Array.from(new Set([
+    item?.action?.roomId,
+    item?.thing?.spaceId,
+    item?.thing?.roomId,
+    item?.capability?.roomId,
+    item?.capability?.logicalRoomId,
+  ].filter((roomId) => typeof roomId === "string" && roomId.trim()).map((roomId) => roomId.trim())));
 }
 
 function getProviderOptions() {

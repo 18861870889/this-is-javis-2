@@ -1,10 +1,10 @@
 # Current Status
 
-> Last updated: 2026-06-22. This document is the short source of truth for current progress, near-term plans, and safety boundaries.
+> Last updated: 2026-07-07. This document is the short source of truth for current progress, near-term plans, and safety boundaries.
 
 ## Current Version
 
-Current engineering progress: `v0.24`.
+Current engineering progress: `v0.25`.
 
 Completed major runtime capabilities:
 
@@ -47,6 +47,7 @@ Completed major runtime capabilities:
 - Decision Review stage after policy/provider simulation and before any authorized provider execution.
 - Household Learning Context that feeds shadow learning back into planner guidance without auto-applying rules.
 - Runtime Gate with default dry-run execution, release readiness checks, and visible UI/API execution mode.
+- Delivery Router M0 for StackChan/Xiaozhi/MCP-originated voice summaries, optional Hermes WeChat delivery, and delivery audit.
 
 `v0.10 Real Home Pilot` is intentionally not marked complete. It requires real-home observation over time and user-authorized low-risk device testing.
 
@@ -194,10 +195,28 @@ Status: implemented and covered by local tests.
 
 Boundary: this is not a public production release. It is a local/internal alpha guardrail so iteration and demonstrations cannot accidentally control real devices.
 
+## v0.25 Jarvis Brain Entry And Delivery Router M0
+
+Status: baseline implemented and covered by local tests.
+
+- Jarvis Brain is the first application-layer entry for StackChan/Xiaozhi/MCP-originated requests.
+- Home requests produce `HomeIntent` and enter HCM for grounding, safety, policy, simulation, execution, verification, and audit.
+- Non-home requests remain Hermes/Jarvis Agent work; the current local PC proof is restricted Markdown creation under `JARVIS_PC_WORKSPACE_ROOT`.
+- Delivery Router M0 adds `delivery` metadata and a separate delivery audit for `/v1/utterance`, Xiaozhi `/v1/chat/completions`, and Jarvis MCP tool results.
+- Direct Hermes WeChat chat is explicitly outside Jarvis Delivery Router; WeChat-to-Hermes conversations remain normal Hermes conversations.
+- Home control and state queries default to StackChan/Xiaozhi voice summaries.
+- PC Markdown creation can produce voice feedback plus optional WeChat details.
+- WeChat delivery uses Hermes' `send_message_tool` through the local Hermes Python environment when `JARVIS_DELIVERY_WECHAT_ENABLED=true`.
+
+Boundary: the M0 voice queue is process-local and delivery-status focused. Multi-process queues, richer priority arbitration, and long-form Hermes/Jarvis Agent task delivery remain M1 work.
+
 ## Current Runtime Chain
 
 ```text
 User Command
+  -> Ingress Adapter / Voice Bridge
+  -> Jarvis Brain Intent Recognition
+  -> HomeIntent for home tasks
   -> Runtime Execution Mode
   -> Conversation Context
   -> Context Snapshot
@@ -207,8 +226,7 @@ User Command
   -> Household Learning Context
   -> Prompt Compile
   -> Prompt Context Pack v2
-  -> LLM Planner
-  -> Intent Frame Normalize
+  -> HomeIntent / Intent Frame Normalize
   -> Semantic Grounding Resolver
   -> Plan Normalize
   -> Intent Accuracy Engine
@@ -218,12 +236,15 @@ User Command
   -> Decision Review
   -> Authorized Provider Execute
   -> Provider State Readback
-  -> Audit / Learning / Agents
+  -> Command Audit / Learning / Agents
+  -> Delivery Router for StackChan/Xiaozhi/MCP-originated output
 ```
 
 Key boundaries:
 
 - LLM understands intent; it does not own service selection or final execution permission.
+- Jarvis Brain is the entry brain: it recognizes the request type and emits `HomeIntent` for home tasks.
+- HCM consumes `HomeIntent`; it does not own general conversation, web research, or PC task execution.
 - Runtime Gate decides whether an otherwise valid provider plan may execute or must remain dry-run.
 - HCM is the upper-layer model; provider entities must not leak directly into planner/runtime code.
 - Safety Gate answers whether a capability is executable.
@@ -232,25 +253,26 @@ Key boundaries:
 
 ## Near-Term Plan
 
-### v0.25 - Conversation Router
+### v0.25 - Jarvis Brain Entry Contract
 
-Status: deferred; intentionally not implemented yet.
+Status: baseline implemented.
 
-Goal: add a lightweight entry router before HCM so obvious non-device requests do not get forced through the smart-home execution chain.
+Goal: make Jarvis Brain the single entry brain so all ingress first becomes an explicit intent contract. Home requests produce `HomeIntent` for HCM; non-home requests become Hermes/Jarvis Agent tasks.
 
-Intended scope:
+Implemented baseline:
 
-- Route deterministic local questions such as current time/date without calling the HCM planner.
-- Route generic chat or story requests to a chat response path instead of returning "no home device can execute this."
-- Route external knowledge questions, such as sports schedules or current events, to a future external knowledge provider or a clear "needs lookup" response.
+- Recognize simple home control/state requests and emit `HomeIntent`.
+- Preserve HCM as the safety runtime for home grounding, policy, simulation, execution, verification, and audit.
+- Route restricted PC Markdown creation through the current local tool path.
+- Keep generic chat, external knowledge, and richer PC tasks as Hermes/Jarvis Agent work.
 - Route device capability questions, such as "电视有哪些可控制功能", to HCM read-only capability lookup.
-- Keep complex home scenes, such as "准备睡觉" or "有点暗", on the existing LLM + HCM path.
+- Keep complex home scenes, such as "准备睡觉" or "有点暗", on the Brain -> HomeIntent -> HCM path.
 
 Constraints:
 
-- No extra LLM call should be added to the hot path.
-- Rules should only handle high-confidence routing; ambiguous home intents still go to the current LLM intent frame.
-- This is a future product layer, not part of the current v0.24 runtime.
+- M0 Brain recognition is local and deterministic for low-latency cases; future prompt/model recognition must keep the same `HomeIntent` contract.
+- Brain must not output provider service calls or HA entity operations as final authority.
+- Delivery Router M0 is implemented for `/v1/utterance`, Xiaozhi `/v1/chat/completions`, and Jarvis MCP tool results; long-form Hermes/Jarvis Agent task delivery is still future work.
 
 ### v0.10 - Real Home Pilot
 

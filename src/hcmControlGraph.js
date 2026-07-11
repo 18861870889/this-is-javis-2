@@ -38,7 +38,10 @@ const ROOM_PATTERNS = [
   ["dining", /餐厅|餐边/],
   ["living", /客厅|大厅|沙发/],
   ["balcony", /阳台/],
-  ["entry", /玄关|入户|门口|过道/],
+  ["entry", /玄关|入户|门口/],
+];
+const FALLBACK_ROOM_PATTERNS = [
+  ["entry", /过道/],
 ];
 
 export function attachHcmControlGraph(home, { mappings = {} } = {}) {
@@ -183,14 +186,18 @@ export function resolveControlAsset(home, assetId) {
 export function findExplicitRoomIds(input, home) {
   const text = normalizeText(input);
   const ids = [];
-  for (const [roomId, pattern] of ROOM_PATTERNS) {
-    if (pattern.test(text)) ids.push(roomId);
-  }
-  // Use shared alias map (includes space names + ROOM_ALIASES)
   const aliasMap = getRoomAliasMap(home);
   for (const [roomId, labels] of aliasMap) {
     const normalizedLabels = labels.map(normalizeText).filter(Boolean);
     if (normalizedLabels.some((label) => text.includes(label))) ids.push(roomId);
+  }
+  for (const [roomId, pattern] of ROOM_PATTERNS) {
+    if (pattern.test(text)) ids.push(roomId);
+  }
+  if (ids.length === 0) {
+    for (const [roomId, pattern] of FALLBACK_ROOM_PATTERNS) {
+      if (pattern.test(text)) ids.push(roomId);
+    }
   }
   return Array.from(new Set(ids));
 }
@@ -311,16 +318,34 @@ function inferControllerInstallation(thing, spaces) {
 
 function inferRoomFromText(value, spaces) {
   const text = normalizeText(value);
+  const spaceMatches = Array.from(spaces.values())
+    .map((space) => ({
+      roomId: space.id,
+      ...bestLabelMatch(text, [space.name, ...(space.aliases ?? [])]),
+    }))
+    .filter((match) => match.index >= 0)
+    .sort((first, second) => first.index - second.index || second.length - first.length);
+  if (spaceMatches.length > 0) return spaceMatches[0].roomId;
+
   const knownMatches = ROOM_PATTERNS
     .map(([roomId, pattern], order) => ({ roomId, order, index: text.search(pattern) }))
     .filter((match) => match.index >= 0 && spaces.has(match.roomId))
     .sort((first, second) => first.index - second.index || first.order - second.order);
   if (knownMatches.length > 0) return knownMatches[0].roomId;
-  for (const space of spaces.values()) {
-    const labels = [space.name, ...(space.aliases ?? [])].map(normalizeText).filter(Boolean);
-    if (labels.some((label) => text.includes(label))) return space.id;
+  for (const [roomId, pattern] of FALLBACK_ROOM_PATTERNS) {
+    if (pattern.test(text) && spaces.has(roomId)) return roomId;
   }
   return null;
+}
+
+function bestLabelMatch(text, labels) {
+  const matches = labels
+    .map(normalizeText)
+    .filter(Boolean)
+    .map((label) => ({ index: text.indexOf(label), length: label.length }))
+    .filter((match) => match.index >= 0)
+    .sort((first, second) => first.index - second.index || second.length - first.length);
+  return matches[0] ?? { index: -1, length: 0 };
 }
 
 function buildAssetDisplayName(rawName, room) {

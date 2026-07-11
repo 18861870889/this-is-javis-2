@@ -96,6 +96,42 @@ describe("policy engine", () => {
       "protected_device_name",
     ]);
   });
+
+  it("hard-blocks camera and microphone targets by name when provider type is wrong", () => {
+    const result = evaluateExecutionPolicy({
+      source: "voice",
+      executionPlan: {
+        accepted: [
+          acceptedItem({
+            thing: { id: "misclassified_camera", name: "客厅监控", type: "switch_panel" },
+            capability: {
+              id: "snapshot",
+              name: "摄像头截图",
+              policy: { risk: "low", confirmation: "never" },
+              binding: { domain: "switch", entityId: "switch.living_camera_snapshot" },
+            },
+          }),
+          acceptedItem({
+            thing: { id: "misclassified_mic", name: "书房麦克风", type: "switch_panel" },
+            capability: {
+              id: "record",
+              name: "录音",
+              policy: { risk: "low", confirmation: "never" },
+              binding: { domain: "switch", entityId: "switch.study_microphone_recording" },
+            },
+          }),
+        ],
+        rejected: [],
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.accepted).toEqual([]);
+    expect(result.rejected).toEqual([
+      expect.objectContaining({ code: "protected_device_name", thingId: "misclassified_camera" }),
+      expect.objectContaining({ code: "protected_device_name", thingId: "misclassified_mic" }),
+    ]);
+  });
 });
 
 function createPolicyHome() {

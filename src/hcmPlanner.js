@@ -11,7 +11,7 @@ import { isContextualTargetSelectionInput, isReferentialControlInput, isRoomScop
 import { INTENT_TYPES, createIntentResolution, normalizeIntentType } from "./intentResolution.js";
 import { findExplicitRoomIds, getHcmControlGraph, resolveControlAsset } from "./hcmControlGraph.js";
 import { normalizeIntentFrame } from "./intentFrame.js";
-import { normalizeSemanticPlannerActions, resolveSemanticGrounding } from "./semanticGroundingResolver.js";
+import { normalizeSemanticPlannerActions, resolveSemanticGrounding, resolveSemanticTarget } from "./semanticGroundingResolver.js";
 import { getRoomLabels, hasSpecificRoomReference } from "./roomAliases.js";
 
 const CONTROL_REQUEST_PATTERN = /打开|开启|启动|关闭|关一下|关掉|停止|暂停|调到|设置|播放|清扫|没关|忘了关|还开着/;
@@ -235,13 +235,13 @@ export function normalizeHcmPlannerDraft(input, draft, home) {
   const inventoryQuery = resolvedActions.length === 0 && !controlRequested && !capabilityQuery && looksLikeInventoryQuery(input)
     ? answerHcmInventoryQuery(input, home, normalizedDraft?.query?.reason)
     : null;
-  const roomLightStateQuery =
-    resolvedActions.length === 0 && !controlRequested && !capabilityQuery && !inventoryQuery && requestedIntentType === "state_query"
-      ? answerHcmRoomLightStateQuery(input, home, normalizedDraft?.query?.reason)
-      : null;
   const selectedStateQuery =
-    resolvedActions.length === 0 && !controlRequested && !capabilityQuery && !inventoryQuery && !roomLightStateQuery && requestedIntentType === "state_query" && looksLikeStateQuery(input) && hasStateQueryTarget(normalizedDraft)
+    resolvedActions.length === 0 && !controlRequested && !capabilityQuery && !inventoryQuery && requestedIntentType === "state_query" && looksLikeStateQuery(input) && hasStateQueryTarget(normalizedDraft)
       ? resolvePlannerStateQuery(input, normalizedDraft, home, rejected)
+      : null;
+  const roomLightStateQuery =
+    resolvedActions.length === 0 && !controlRequested && !capabilityQuery && !inventoryQuery && !selectedStateQuery && requestedIntentType === "state_query"
+      ? answerHcmRoomLightStateQuery(input, home, normalizedDraft?.query?.reason)
       : null;
   const occupancyStateQuery =
     resolvedActions.length === 0 && !controlRequested && !capabilityQuery && !inventoryQuery && !roomLightStateQuery && !selectedStateQuery && requestedIntentType === "state_query"
@@ -545,7 +545,7 @@ function isPlannerExecutableCapability(capability) {
 }
 
 function findSpecificRoomIds(input, home) {
-  if (!hasSpecificRoomReference(input)) return [];
+  if (!hasSpecificRoomReference(input, home)) return [];
   return findExplicitRoomIds(input, home);
 }
 
@@ -573,12 +573,28 @@ function normalizePlannerValue(value, capability) {
 function resolvePlannerStateQuery(input, draft, home, rejected) {
   const query = draft?.query;
   if (!query || typeof query !== "object") return null;
-  const thingId = query.device_id || query.thingId;
+  const semanticTarget = query.target || query.targetRef || query.name;
+  let thingId = query.device_id || query.thingId;
+  if (!thingId && semanticTarget) {
+    const resolved = resolveSemanticTarget({ target: semanticTarget, room_id: query.room_id }, { input, home });
+    if (!resolved.ok) {
+      rejected.push(resolved.message);
+      return null;
+    }
+    thingId = resolved.target.id;
+  }
   if (typeof thingId !== "string" || !thingId.trim()) {
     rejected.push("状态查询缺少 HCM device_id");
     return null;
   }
   const answer = answerHcmThingStateQuery(input, home, thingId, query.reason);
+  if (!answer) {
+    const resolved = resolveSemanticTarget({ target: thingId, room_id: query.room_id }, { input, home });
+    if (resolved.ok) {
+      const semanticAnswer = answerHcmThingStateQuery(input, home, resolved.target.id, query.reason);
+      if (semanticAnswer) return semanticAnswer;
+    }
+  }
   if (!answer) {
     rejected.push(`状态查询目标不存在 ${thingId}`);
     return null;
@@ -589,7 +605,7 @@ function resolvePlannerStateQuery(input, draft, home, rejected) {
 function hasStateQueryTarget(draft) {
   const query = draft?.query;
   if (!query || typeof query !== "object") return false;
-  const thingId = query.device_id || query.thingId;
+  const thingId = query.device_id || query.thingId || query.target || query.targetRef || query.name;
   return typeof thingId === "string" && thingId.trim().length > 0;
 }
 
@@ -623,7 +639,7 @@ function toNormalizedAction(result, action) {
     providerThingName: result.logicalAsset ? result.thing.name : undefined,
     logicalAssetId: result.logicalAsset?.id,
     logicalAssetName: result.logicalAsset?.name,
-    logicalRoomId: result.logicalAsset?.spaceId,
+    logicalRoomId: result.logicalAsset?.spaceId ?? result.thing.spaceId,
     capabilityId: result.capability.id,
     capabilityName: result.logicalAsset ? `${result.logicalAsset.name}开关` : result.capability.name,
     value: normalizePlannerValue(action.value, result.capability),

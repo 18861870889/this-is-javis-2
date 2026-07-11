@@ -23,11 +23,16 @@ export const ROOM_ALIASES = [
 ];
 
 const SPECIFIC_ROOM_REFERENCE_RE =
-  /主卧卫生间|主卧洗手间|主卧厕所|主卧浴室|主人房厕所|公共卫生间|公共厕所|玄关|入户|门口|门厅|客厅|大厅|沙发|餐厅|厨房|书房|主卧|主人房|大卧室|次卧|二卧|小孩房|儿童房|猫猫房|猫房|公卫|客卫|主卫|阳台/;
+  /主卧卫生间|主卧洗手间|主卧厕所|主卧浴室|主人房厕所|公共卫生间|公共厕所|玄关|入户|过道|门口|门厅|客厅|大厅|沙发|餐厅|厨房|书房|主卧|主人房|大卧室|次卧|二卧|小孩房|儿童房|猫猫房|猫房|公卫|客卫|主卫|阳台/;
 
-export function hasSpecificRoomReference(input) {
+export function hasSpecificRoomReference(input, home) {
   const text = String(input ?? "").trim().replace(/\s+/g, "");
-  return SPECIFIC_ROOM_REFERENCE_RE.test(text);
+  if (SPECIFIC_ROOM_REFERENCE_RE.test(text)) return true;
+  return (home?.spaces ?? []).some((space) =>
+    [space.name, ...(space.aliases ?? [])]
+      .filter(Boolean)
+      .some((label) => text.includes(String(label).trim().replace(/\s+/g, ""))),
+  );
 }
 
 /**

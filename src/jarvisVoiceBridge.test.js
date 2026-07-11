@@ -6,9 +6,20 @@ import {
   classifyUtterance,
   formatVoiceBridgeResponse,
   normalizeUtterancePayload,
+  normalizeVoiceAsrText,
 } from "./jarvisVoiceBridge.js";
 
 describe("Jarvis voice bridge", () => {
+  it("normalizes narrow second-bedroom ASR confusions before routing", () => {
+    expect(normalizeVoiceAsrText("是我吸顶灯开着吗？")).toBe("次卧吸顶灯开着吗？");
+    expect(normalizeVoiceAsrText("打开是我入户射灯")).toBe("打开次卧入户射灯");
+    expect(normalizeVoiceAsrText("放吊灯。")).toBe("关吊灯。");
+    expect(normalizeVoiceAsrText("帮我放射灯")).toBe("帮我关射灯");
+    expect(normalizeVoiceAsrText("关闭过道设灯。")).toBe("关闭过道射灯。");
+    expect(normalizeVoiceAsrText("关闭过道射灯啊。")).toBe("关闭过道射灯。");
+    expect(normalizeVoiceAsrText("不是我想打开灯")).toBe("不是我想打开灯");
+  });
+
   it("routes simple home control to the HCM fast path with an external planner draft", () => {
     const utterance = normalizeUtterancePayload({
       deviceId: "stackchan-study",
@@ -39,6 +50,31 @@ describe("Jarvis voice bridge", () => {
     expect(hcmPayload.plannerDraft.actions[0].room_id).toBeUndefined();
   });
 
+  it("routes polite home controls to the fast path without planner dependency", () => {
+    const utterance = normalizeUtterancePayload({
+      deviceId: "stackchan-second",
+      roomId: "living",
+      text: "帮我打开次卧入户射灯。",
+    });
+    const classification = classifyUtterance(utterance.text);
+    const hcmPayload = buildHcmPayloadFromUtterance(utterance, classification);
+
+    expect(classification).toMatchObject({
+      route: "hcm_fast_path",
+      reason: "simple_power_command",
+      plannerDraft: {
+        actions: [{ target: "次卧入户射灯", capability: "power", value: true }],
+      },
+    });
+    expect(hcmPayload).toMatchObject({
+      skipPlanner: true,
+      plannerDraft: {
+        actions: [{ target: "次卧入户射灯", capability: "power", value: true }],
+      },
+    });
+    expect(hcmPayload.plannerDraft.actions[0].room_id).toBeUndefined();
+  });
+
   it("routes home state queries to a read-only HCM fast path", () => {
     const utterance = normalizeUtterancePayload({
       deviceId: "stackchan-study",
@@ -64,7 +100,7 @@ describe("Jarvis voice bridge", () => {
       skipPlanner: true,
       plannerDraft: {
         intent_type: "state_query",
-        query: { mode: "state" },
+        query: { mode: "state", target: "书房射灯" },
         actions: [],
       },
     });
