@@ -1,9 +1,8 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import { createServer as createHttpServer } from "node:http";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { HOME_ASSISTANT_ADAPTER_ID, createHomeAssistantAdapter } from "./src/adapters/homeAssistantAdapter.js";
 import { createProviderAdapterRegistry } from "./src/adapters/providerAdapterRegistry.js";
@@ -166,13 +165,17 @@ app.use((request, response, next) => {
 app.use(express.json({ limit: "20mb" }));
 
 app.get("/api/runtime/status", (_request, response) => {
-  response.json(buildRuntimeStatus({
-    env: process.env,
-    haConfigured: homeAssistantAdapter.isConfigured(),
-    llmConfigured: Boolean(process.env.OPENAI_API_KEY),
-    hasOnboardingBaseline: Boolean(readProviderSnapshotRecord()?.graph),
-    commandAuditEnabled: Boolean(commandAuditPath),
-  }));
+  const storage = inspectRuntimeStorage();
+  response.status(storage.writable ? 200 : 503).json({
+    ...buildRuntimeStatus({
+      env: process.env,
+      haConfigured: homeAssistantAdapter.isConfigured(),
+      llmConfigured: Boolean(process.env.OPENAI_API_KEY),
+      hasOnboardingBaseline: Boolean(readProviderSnapshotRecord()?.graph),
+      commandAuditEnabled: Boolean(commandAuditPath),
+    }),
+    storage,
+  });
 });
 
 app.get("/api/spatial-editor/state", (_request, response) => {
@@ -709,17 +712,11 @@ app.post("/api/adapters/home-assistant/actions", async (request, response) => {
 
 const httpServer = createHttpServer(app);
 
-const vite = await createViteServer({
-  server: {
-    middlewareMode: true,
-    hmr: {
-      server: httpServer,
-    },
-  },
-  appType: "spa",
-});
-
-app.use(vite.middlewares);
+if (process.env.NODE_ENV === "production") {
+  configureProductionFrontend();
+} else {
+  await configureDevelopmentFrontend();
+}
 
 httpServer.listen(port, bindHost, () => {
   const displayHost = bindHost === "0.0.0.0" ? "localhost" : bindHost;
@@ -733,6 +730,61 @@ httpServer.listen(port, bindHost, () => {
       : "LLM Gateway running in simulated fallback mode. Set OPENAI_API_KEY to enable real model calls.",
   );
 });
+
+function configureProductionFrontend() {
+  const staticRoot = resolve(process.cwd(), process.env.JARVIS_STATIC_ROOT || "dist");
+  const indexPath = resolve(staticRoot, "index.html");
+  if (!existsSync(indexPath)) {
+    throw new Error(`Production frontend is missing: ${indexPath}. Run npm run build before starting Jarvis.`);
+  }
+  app.use(express.static(staticRoot, {
+    etag: true,
+    index: "index.html",
+    immutable: true,
+    maxAge: "1y",
+    setHeaders(response, path) {
+      if (basename(path) === "index.html") {
+        response.setHeader("Cache-Control", "no-cache");
+      }
+    },
+  }));
+  app.get(/^(?!\/(?:api|v1|mcp)(?:\/|$)).*/, (request, response, next) => {
+    if (!request.accepts("html")) {
+      next();
+      return;
+    }
+    response.setHeader("Cache-Control", "no-cache");
+    response.sendFile(indexPath);
+  });
+}
+
+function inspectRuntimeStorage() {
+  const path = dirname(commandAuditPath);
+  try {
+    mkdirSync(path, { recursive: true });
+    accessSync(path, fsConstants.W_OK);
+    return { writable: true };
+  } catch {
+    return {
+      writable: false,
+      error: "runtime_storage_unavailable",
+    };
+  }
+}
+
+async function configureDevelopmentFrontend() {
+  const { createServer: createViteServer } = await import("vite");
+  const vite = await createViteServer({
+    server: {
+      middlewareMode: true,
+      hmr: {
+        server: httpServer,
+      },
+    },
+    appType: "spa",
+  });
+  app.use(vite.middlewares);
+}
 
 function getCliPort() {
   const args = process.argv.slice(2);

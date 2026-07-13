@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +21,38 @@ afterEach(async () => {
 });
 
 describe("Jarvis server voice routes", () => {
+  it("serves the built frontend in production while preserving API 404 responses", async () => {
+    const tempDir = createTempDir();
+    const staticRoot = join(tempDir, "dist");
+    mkdirSync(staticRoot, { recursive: true });
+    writeFileSync(join(staticRoot, "index.html"), "<!doctype html><title>Jarvis container frontend</title>", "utf8");
+    const harness = await startHarness({
+      tempDir,
+      env: {
+        NODE_ENV: "production",
+        JARVIS_STATIC_ROOT: staticRoot,
+      },
+    });
+
+    const frontend = await fetch(`${harness.url}/`);
+    const frontendText = await frontend.text();
+    const missingApi = await fetch(`${harness.url}/api/does-not-exist`, {
+      headers: { Accept: "application/json" },
+    });
+    const missingApiText = await missingApi.text();
+    const runtimeStatus = await fetch(`${harness.url}/api/runtime/status`);
+    const runtimePayload = await runtimeStatus.json();
+
+    expect(frontend.status).toBe(200);
+    expect(frontend.headers.get("content-type")).toContain("text/html");
+    expect(frontend.headers.get("cache-control")).toContain("no-cache");
+    expect(frontendText).toContain("Jarvis container frontend");
+    expect(missingApi.status).toBe(404);
+    expect(missingApiText).not.toContain("Jarvis container frontend");
+    expect(runtimeStatus.status).toBe(200);
+    expect(runtimePayload.storage).toEqual({ writable: true });
+  }, 30000);
+
   it("handles a StackChan fast-path utterance without OPENAI_API_KEY and dedupes repeated wake sessions", async () => {
     const tempDir = createTempDir();
     const ha = await startMockHomeAssistant();

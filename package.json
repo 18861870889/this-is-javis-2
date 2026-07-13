@@ -48,7 +48,16 @@
     "stackchan:firmware:preflight": "node scripts/stackchan-firmware-gate.mjs preflight",
     "stackchan:firmware:device-check": "node scripts/stackchan-firmware-gate.mjs device-check",
     "stackchan:firmware:flash": "node scripts/stackchan-firmware-gate.mjs flash",
-    "stackchan:firmware:rollback": "node scripts/stackchan-firmware-gate.mjs rollback"
+    "stackchan:firmware:rollback": "node scripts/stackchan-firmware-gate.mjs rollback",
+    "container:check": "node scripts/jarvis-container.mjs check",
+    "container:build": "node scripts/jarvis-container.mjs build",
+    "container:start": "node scripts/jarvis-container.mjs start",
+    "container:stop": "node scripts/jarvis-container.mjs stop",
+    "container:status": "node scripts/jarvis-container.mjs status",
+    "container:smoke": "node scripts/jarvis-container.mjs smoke",
+    "container:docker:build": "docker compose build",
+    "container:docker:start": "docker compose up --detach --build",
+    "container:docker:stop": "docker compose down"
   },
   "dependencies": {
     "express": "^5.2.1",

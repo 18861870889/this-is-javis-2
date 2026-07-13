@@ -61,6 +61,7 @@ See [current status](docs/CURRENT_STATUS.md) and the [roadmap](docs/ROADMAP.md) 
 
 - Node.js `20.19+` or `22.12+`
 - npm
+- Optional: Apple Container `1.1.0+` on Apple silicon with macOS 26, or Docker with Compose
 - Optional: Home Assistant with a least-privilege long-lived token
 - Optional: a local Hermes/Jarvis Agent runtime
 - Optional: Xiaozhi Server and StackChan hardware
@@ -93,6 +94,25 @@ HA_TOKEN=replace-with-a-least-privilege-token
 
 Do not switch to `HARNESS_EXECUTION_MODE=real` until dry-run logs resolve the intended room, entity, capability, and action.
 
+## Container Deployment
+
+Jarvis ships as one OCI image. The project wrapper prefers [Apple Container](https://github.com/apple/container) on supported Macs and remains compatible with Docker Compose:
+
+```bash
+cp .env.example .env
+npm run container:check
+npm run container:build
+npm run container:smoke
+npm run container:start
+npm run container:status
+```
+
+Open `http://127.0.0.1:5173`. The default container is bound only to localhost and remains in `dry_run`; switching Home Assistant to real execution requires an explicit local configuration change. Stop it with `npm run container:stop`.
+
+Keep every HA, Hermes, LLM, STT, TTS, and Xiaozhi credential in the ignored `.env` file. The image does not contain secrets. Containerized Jarvis uses `HERMES_API_TRANSPORT=api`; point `HERMES_API_BASE_URL` at an address reachable from inside the container instead of a host-only `127.0.0.1` endpoint.
+
+See the [container deployment runbook](docs/JARVIS_CONTAINER_DEPLOYMENT.md) for Apple Container and Docker prerequisites, networking, smoke tests, rollback, and real-control gates.
+
 ## Xiaozhi Integration
 
 Keep Xiaozhi's voice modules and point only its OpenAI-compatible LLM provider to Jarvis:
@@ -121,6 +141,12 @@ The documented configuration surface lives in [.env.example](.env.example). Comm
 | `JARVIS_BIND_HOST` | `127.0.0.1` | HTTP bind address |
 | `PORT` | `5173` | Jarvis port |
 | `HARNESS_EXECUTION_MODE` | `dry_run` | `dry_run` or intentional real execution |
+| `JARVIS_CONTAINER_ENGINE` | `auto` | Prefer Apple Container, or select `apple` / `docker` explicitly |
+| `JARVIS_CONTAINER_BIND_HOST` | `127.0.0.1` | Host address used to publish the container port |
+| `JARVIS_CONTAINER_PORT` | `5173` | Host port for containerized Jarvis |
+| `JARVIS_CONTAINER_EXECUTION_MODE` | `dry_run` | Container-specific Home Assistant execution gate |
+| `JARVIS_CONTAINER_CPUS` | `2.0` | Docker Compose CPU limit |
+| `JARVIS_CONTAINER_MEMORY` | `1g` | Docker Compose memory limit |
 | `HA_BASE_URL` / `HA_TOKEN` | empty | Home Assistant connection |
 | `HERMES_API_BASE_URL` | empty | Hermes/Jarvis Agent endpoint |
 | `JARVIS_STACKCHAN_DEVICE_ROOMS` | empty | Trusted device-to-room placement map |
@@ -169,6 +195,7 @@ Hardware and real-control checks are intentionally separate because they require
 - [Engineering control](docs/JARVIS_ENGINEERING_CONTROL.md)
 - [HCM control graph](docs/HCM_CONTROL_GRAPH.md)
 - [Security baseline](docs/SECURITY_BASELINE.md)
+- [Container deployment](docs/JARVIS_CONTAINER_DEPLOYMENT.md)
 - [Verification plan](docs/JARVIS_VERIFICATION_PLAN.md)
 - [Testing policy](docs/TESTING_POLICY.md)
 - [Adapter SDK](docs/ADAPTER_SDK.md)
