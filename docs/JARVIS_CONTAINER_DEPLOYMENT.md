@@ -9,6 +9,7 @@ The defaults are intentionally conservative:
 - load credentials from an ignored local `.env`, never from the image;
 - run Hermes through its API transport;
 - run as a non-root user with a read-only root filesystem and dropped capabilities.
+- limit production frontend fallback traffic per client without throttling Jarvis API routes.
 
 ## Choose A Runtime
 

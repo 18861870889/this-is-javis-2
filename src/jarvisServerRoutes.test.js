@@ -31,6 +31,7 @@ describe("Jarvis server voice routes", () => {
       env: {
         NODE_ENV: "production",
         JARVIS_STATIC_ROOT: staticRoot,
+        JARVIS_FRONTEND_RATE_LIMIT_PER_MINUTE: "2",
       },
     });
 
@@ -42,6 +43,15 @@ describe("Jarvis server voice routes", () => {
     const missingApiText = await missingApi.text();
     const runtimeStatus = await fetch(`${harness.url}/api/runtime/status`);
     const runtimePayload = await runtimeStatus.json();
+    const spaFallbackOne = await fetch(`${harness.url}/workspace/one`, {
+      headers: { Accept: "text/html" },
+    });
+    const spaFallbackTwo = await fetch(`${harness.url}/workspace/two`, {
+      headers: { Accept: "text/html" },
+    });
+    const rateLimitedFallback = await fetch(`${harness.url}/workspace/three`, {
+      headers: { Accept: "text/html" },
+    });
 
     expect(frontend.status).toBe(200);
     expect(frontend.headers.get("content-type")).toContain("text/html");
@@ -51,6 +61,10 @@ describe("Jarvis server voice routes", () => {
     expect(missingApiText).not.toContain("Jarvis container frontend");
     expect(runtimeStatus.status).toBe(200);
     expect(runtimePayload.storage).toEqual({ writable: true });
+    expect(spaFallbackOne.status).toBe(200);
+    expect(spaFallbackTwo.status).toBe(200);
+    expect(rateLimitedFallback.status).toBe(429);
+    expect(rateLimitedFallback.headers.get("ratelimit")).toBeTruthy();
   }, 30000);
 
   it("handles a StackChan fast-path utterance without OPENAI_API_KEY and dedupes repeated wake sessions", async () => {

@@ -32,6 +32,7 @@ All notable changes to this project will be documented in this file. The format 
 - Replaced user-controlled and backtracking-prone regular expressions with literal or bounded string matching.
 - Parse provider URLs before matching trusted DeepSeek hostnames and use SHA-256 for semantic cache identifiers.
 - Run the production container as a non-root user with a read-only root filesystem, dropped Linux capabilities, `no-new-privileges`, and a dedicated writable data volume.
+- Rate-limit production SPA fallback requests with standard response headers.
 
 ## [0.1.0] - 2026-07-11
 

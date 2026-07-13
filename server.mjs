@@ -1,4 +1,5 @@
 import express from "express";
+import { rateLimit } from "express-rate-limit";
 import { createServer as createHttpServer } from "node:http";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
@@ -748,7 +749,14 @@ function configureProductionFrontend() {
       }
     },
   }));
-  app.get(/^(?!\/(?:api|v1|mcp)(?:\/|$)).*/, (request, response, next) => {
+  const frontendLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: getFrontendRateLimit(),
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    message: "Too many requests. Please try again shortly.",
+  });
+  app.get(/^(?!\/(?:api|v1|mcp)(?:\/|$)).*/, frontendLimiter, (request, response, next) => {
     if (!request.accepts("html")) {
       next();
       return;
@@ -756,6 +764,11 @@ function configureProductionFrontend() {
     response.setHeader("Cache-Control", "no-cache");
     response.sendFile(indexPath);
   });
+}
+
+function getFrontendRateLimit() {
+  const configured = Number.parseInt(process.env.JARVIS_FRONTEND_RATE_LIMIT_PER_MINUTE || "300", 10);
+  return Number.isInteger(configured) && configured > 0 ? configured : 300;
 }
 
 function inspectRuntimeStorage() {
