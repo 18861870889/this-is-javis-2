@@ -199,7 +199,7 @@ export function homeSignatureFromHome(home = {}) {
   const spaces = (home.spaces ?? []).map((space) => `${space.id}:${space.name}`).sort();
   const things = (home.things ?? []).map((thing) => `${thing.id}:${thing.name}:${thing.spaceId || thing.roomId || ""}`).sort();
   const assets = (home.controlGraph?.assets ?? []).map((asset) => `${asset.id}:${asset.name}:${asset.spaceId || ""}`).sort();
-  return createHash("sha1")
+  return createHash("sha256")
     .update(JSON.stringify({ spaces, things, assets }))
     .digest("hex")
     .slice(0, 16);
@@ -333,7 +333,7 @@ function clonePlannerDraft(draft) {
 }
 
 function stableCacheId(semanticKey, homeSignature = "") {
-  return `semantic_${createHash("sha1").update(`${semanticKey}:${homeSignature || "any"}`).digest("hex").slice(0, 12)}`;
+  return `semantic_${createHash("sha256").update(`${semanticKey}:${homeSignature || "any"}`).digest("hex").slice(0, 12)}`;
 }
 
 function cacheHitConfidence(entry) {

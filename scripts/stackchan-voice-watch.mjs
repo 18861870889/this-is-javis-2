@@ -18,7 +18,6 @@ const statusEveryMs = positiveInteger(args.values["status-ms"] || process.env.ST
 const contextBytes = fresh ? 0 : positiveInteger(args.values["context-bytes"] || process.env.STACKCHAN_VOICE_WATCH_CONTEXT_BYTES, 200_000);
 const deviceId = args.values["device-id"] || process.env.STACKCHAN_VOICE_WATCH_DEVICE_ID || process.env.XIAOZHI_WS_SMOKE_DEVICE_ID || "";
 const expectText = args.values["expect-text"] || process.env.STACKCHAN_VOICE_WATCH_EXPECT_TEXT || "";
-const expectTextPattern = compilePattern(expectText);
 const pcFile = args.values["pc-file"] || process.env.STACKCHAN_VOICE_WATCH_PC_FILE || "";
 const expectPcContent = args.values["expect-pc-content"] || process.env.STACKCHAN_VOICE_WATCH_EXPECT_PC_CONTENT || "helloworld";
 const requireRealHa = args.flags.has("require-real-ha") || process.env.STACKCHAN_VOICE_WATCH_REQUIRE_REAL_HA === "true";
@@ -142,7 +141,7 @@ class VoiceAcceptanceObserver {
     console.log(`Jarvis audit: ${this.config.paths.auditLog}`);
     console.log(`PC workspace: ${this.config.paths.pcWorkspace}`);
     if (this.config.paths.serialLog) console.log(`Serial log: ${this.config.paths.serialLog}`);
-    if (this.config.expectText) console.log(`Expected text pattern: ${this.config.expectText}`);
+    if (this.config.expectText) console.log(`Expected text: ${this.config.expectText}`);
     if (this.config.pcFile) console.log(`Expected PC file: ${this.config.pcFile}`);
     if (this.config.requireRealHa) console.log("HA real-control requirement: enabled");
     if (this.config.requireTrigger) console.log("Wake/touch trigger evidence requirement: enabled");
@@ -289,7 +288,7 @@ class VoiceAcceptanceObserver {
 
     const firstTts = matchGroup(line, /发送第一段语音:\s*(.+)$/) || matchGroup(line, /发送音频消息:\s*SentenceType\.FIRST,\s*(.+)$/);
     if (firstTts) {
-      if (!this.config.expectTextPattern || this.stages.get("tts_sent")?.status !== "pass") {
+      if (!this.config.expectText || this.stages.get("tts_sent")?.status !== "pass") {
         this.latestTtsText = firstTts.trim();
       }
       this.markPcResultFromText(firstTts, { source: "xiaozhi" });
@@ -346,17 +345,17 @@ class VoiceAcceptanceObserver {
   }
 
   auditMatchesExpectedText(entry) {
-    if (!this.config.expectTextPattern) return true;
+    if (!this.config.expectText) return true;
     const input = String(entry.input || "");
-    return this.config.expectTextPattern.test(input);
+    return input.includes(this.config.expectText);
   }
 
   markRecognizedText(text, { source, inferred = false }) {
     const value = String(text || "").trim();
     if (!value) return;
     if (isIdleClosingPrompt(value)) return;
-    if (this.config.expectTextPattern && !this.config.expectTextPattern.test(value)) {
-      this.warn(`Recognized text did not match expected pattern: ${shorten(value)}`);
+    if (this.config.expectText && !value.includes(this.config.expectText)) {
+      this.warn(`Recognized text did not include expected text: ${shorten(value)}`);
       return false;
     }
     this.latestRecognizedText = value;
@@ -667,15 +666,6 @@ function resolvePath(path) {
   return path.startsWith("/") ? path : resolve(repoRoot, path);
 }
 
-function compilePattern(value) {
-  if (!value) return null;
-  if (value.startsWith("/") && value.lastIndexOf("/") > 0) {
-    const last = value.lastIndexOf("/");
-    return new RegExp(value.slice(1, last), value.slice(last + 1));
-  }
-  return new RegExp(escapeRegExp(value));
-}
-
 function extractDeviceId(line) {
   return matchGroup(line, /['"]device-id['"]\s*:\s*['"]([^'"]+)['"]/) || matchGroup(line, /device-id['"]?\s*[:=]\s*['"]?([0-9a-f:.-]+)/i);
 }
@@ -705,10 +695,6 @@ function shorten(value, max = 120) {
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.round(number) : fallback;
@@ -733,7 +719,6 @@ const observer = new VoiceAcceptanceObserver({
   statusEveryMs,
   contextBytes,
   deviceId,
-  expectTextPattern,
   expectText,
   pcFile,
   expectPcContent,

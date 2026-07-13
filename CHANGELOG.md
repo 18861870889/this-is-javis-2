@@ -25,6 +25,8 @@ All notable changes to this project will be documented in this file. The format 
 
 - Removed machine- and device-specific defaults from the public runtime and firmware tooling.
 - Enabled private vulnerability reporting, secret scanning push protection, and Dependabot security updates on GitHub.
+- Replaced user-controlled and backtracking-prone regular expressions with literal or bounded string matching.
+- Parse provider URLs before matching trusted DeepSeek hostnames and use SHA-256 for semantic cache identifiers.
 
 ## [0.1.0] - 2026-07-11
 

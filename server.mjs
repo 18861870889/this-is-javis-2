@@ -3378,7 +3378,13 @@ function extractExecutionRoomIds(item) {
 }
 
 function getProviderOptions() {
-  if (!getBaseUrl().includes("deepseek.com")) return {};
+  let hostname;
+  try {
+    hostname = new URL(getBaseUrl()).hostname.toLowerCase();
+  } catch {
+    return {};
+  }
+  if (hostname !== "deepseek.com" && !hostname.endsWith(".deepseek.com")) return {};
   return {
     thinking: { type: "disabled" },
   };

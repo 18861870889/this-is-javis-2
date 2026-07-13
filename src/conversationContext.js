@@ -67,9 +67,28 @@ export function isReferentialControlInput(input) {
 export function isPartialExecutionConfirmationInput(input) {
   const text = normalize(input);
   return /^(执行|继续|可以|好|好的|确认|打开吧|关吧|执行吧|继续吧)$/.test(text)
-    || /跳过.*(离线|不可用|失败)/.test(text)
-    || /(执行|继续).*(其他|剩下|可执行)/.test(text)
-    || /(只|仅).*(执行|操作).*(可执行|其他|剩下)/.test(text);
+    || containsTermsInOrder(text, [["跳过"], ["离线", "不可用", "失败"]])
+    || containsTermsInOrder(text, [["执行", "继续"], ["其他", "剩下", "可执行"]])
+    || containsTermsInOrder(text, [["只", "仅"], ["执行", "操作"], ["可执行", "其他", "剩下"]]);
+}
+
+function containsTermsInOrder(text, termGroups) {
+  let searchFrom = 0;
+  for (const terms of termGroups) {
+    let nextIndex = -1;
+    let nextLength = 0;
+    for (const term of terms) {
+      const index = text.indexOf(term, searchFrom);
+      if (index < 0) continue;
+      if (nextIndex < 0 || index < nextIndex || (index === nextIndex && term.length < nextLength)) {
+        nextIndex = index;
+        nextLength = term.length;
+      }
+    }
+    if (nextIndex < 0) return false;
+    searchFrom = nextIndex + nextLength;
+  }
+  return true;
 }
 
 export function isRoomScopedFollowUpInput(input) {
