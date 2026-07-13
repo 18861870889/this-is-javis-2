@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const xiaozhiWsUrl = process.env.XIAOZHI_WS_SMOKE_URL || "ws://127.0.0.1:8000/xiaozhi/v1/";
-const deviceId = process.env.XIAOZHI_WS_SMOKE_DEVICE_ID || "80:45:6b:4d:da:d0";
+const deviceId = process.env.XIAOZHI_WS_SMOKE_DEVICE_ID || "02:00:00:00:00:01";
 const clientId = process.env.XIAOZHI_WS_SMOKE_CLIENT_ID || "jarvis-ws-smoke";
 const timeoutMs = positiveInteger(process.env.XIAOZHI_WS_SMOKE_TIMEOUT_MS, 60_000);
 const pcWorkspaceRoot = resolve(repoRoot, process.env.JARVIS_PC_WORKSPACE_ROOT || "data/pc-workspace.local");

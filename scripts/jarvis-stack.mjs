@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import net from "node:net";
+import { homedir } from "node:os";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultXiaozhiRoot = resolve(repoRoot, "../xiaozhi-esp32-server-jarvis/main/xiaozhi-server");
@@ -13,7 +14,7 @@ const jarvisPort = Number(process.env.JARVIS_STACK_JARVIS_PORT || 5183);
 const xiaozhiWsPort = Number(process.env.JARVIS_STACK_XIAOZHI_WS_PORT || 8000);
 const xiaozhiHttpPort = Number(process.env.JARVIS_STACK_XIAOZHI_HTTP_PORT || 8003);
 const hermesAgentBaseUrl = process.env.HERMES_API_BASE_URL || process.env.HERMES_API_URL || "http://127.0.0.1:19998";
-const hermesCliPython = process.env.HERMES_CLI_PYTHON || "/Users/jerf/.hermes/hermes-agent/venv/bin/python";
+const hermesCliPython = process.env.HERMES_CLI_PYTHON || resolve(homedir(), ".hermes/hermes-agent/venv/bin/python");
 
 const command = process.argv[2] || "status";
 const mode = process.argv[3] || "dry-run";

@@ -1,70 +1,101 @@
 # Harness House Jarvis
 
-PC-side Jarvis brain, home-control safety runtime, and delivery layer for a multi-room smart home.
+[![CI](https://github.com/18861870889/this-is-javis-2/actions/workflows/ci.yml/badge.svg)](https://github.com/18861870889/this-is-javis-2/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/18861870889/this-is-javis-2/actions/workflows/codeql.yml/badge.svg)](https://github.com/18861870889/this-is-javis-2/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-This repository owns the PC-side Jarvis Brain, HCM safety runtime, local agent handoff, and delivery routing. StackChan firmware work lives in a separate firmware workspace/repository so device changes can be backed up, reviewed, built, and flashed independently.
+A local-first Jarvis brain for StackChan, Xiaozhi, Home Assistant, and PC tasks.
 
-## Current Scope
+> [!IMPORTANT]
+> This project is experimental. Home control is disabled by default through `dry_run`; review the [security baseline](docs/SECURITY_BASELINE.md) before connecting real devices or exposing any service to a LAN.
 
-- `/v1/utterance` voice bridge for StackChan or any HTTP speech adapter. It performs ingress hygiene, then hands the utterance to Jarvis Brain.
-- `/mcp` JSON-RPC HTTP bridge exposing home-control and restricted PC tools for StackChan/Xiaozhi or HA MCP proxies.
-- `/v1/chat/completions` OpenAI-compatible Jarvis brain endpoint for Xiaozhi local server LLM routing.
-- Multi-device wake-session dedupe: duplicated utterances return `duplicate_ignored` and `speak:false`.
-- Jarvis Brain M0 intent recognition emits `HomeIntent` for home tasks before HCM receives them.
-- HCM consumes `HomeIntent` and owns grounding, safety, policy, simulation, decision review, HA execution, state verification, and audit.
-- Non-home tasks are routed to Hermes/Jarvis Agent or restricted local tools such as creating Markdown files.
-- Delivery Router is the product boundary for returning short voice summaries, longer WeChat messages, and delivery/audit status.
-- Explicit room priority: "关主卧灯" wins over the source room; "关灯" may use the trusted device room; "卧室灯" outside a bedroom asks for clarification.
-- Optional trusted device placement via `JARVIS_STACKCHAN_DEVICE_ROOMS`.
-- Learning feedback via spoken "可以 / 别这样 / 撤销" and pending prompt binding.
-- L1/L2 proactive opportunity detector foundation. No proactive auto-execution in M1.
-- Home Assistant control only through HCM grounding, policy, simulation, decision review, and audit.
+## What It Does
 
-Strong safety devices such as locks, gas devices, water valves, valves, alarm panels, and camera-related controls remain blocked or require stronger future authorization.
+- Keeps Xiaozhi's tuned wake-word, ASR, VAD, and TTS experience while replacing its LLM endpoint with Jarvis.
+- Uses Jarvis Brain to classify requests and produce structured home-control intent.
+- Sends every real home action through HCM policy, simulation, execution, verification, and audit.
+- Routes non-home requests to Hermes/Jarvis Agent or restricted local PC tools.
+- Deduplicates the same wake session when multiple StackChan devices hear one command.
+- Returns short voice results and optional long-form delivery metadata through Delivery Router.
+- Stores contextual memory and successful semantic plans for faster repeated commands.
+
+Locks, gas devices, water valves, alarm panels, camera controls, and similarly sensitive capabilities remain blocked or require stronger authorization.
+
+## Architecture
+
+```text
+StackChan microphone / speaker
+  -> Xiaozhi (wake word, ASR, VAD, TTS)
+  -> Jarvis Brain (conversation, intent recognition, semantic planning)
+       -> home request -> HCM safety runtime -> Home Assistant -> device
+       -> other task   -> Hermes / local tools -> PC or network result
+  -> Delivery Router (StackChan voice, optional WeChat, audit status)
+```
+
+The boundary is deliberate: Jarvis Brain understands and plans; HCM is the final authority for real home execution. Hermes cannot bypass HCM to call Home Assistant directly. Direct WeChat conversations with Hermes do not enter Delivery Router.
+
+StackChan firmware is maintained separately so device backups, builds, reviews, and flashes do not get mixed with PC-side runtime changes.
+
+## Project Status
+
+Implemented today:
+
+- OpenAI-compatible Jarvis endpoint: `POST /v1/chat/completions`
+- StackChan/HTTP voice ingress: `POST /v1/utterance`
+- MCP bridge: `GET|POST /mcp`
+- Home Assistant discovery, dry-run, real execution gates, state verification, and audit
+- Hermes slow path, long-task subprocess support, and task status
+- Voice dedupe, room context, semantic cache, learning feedback, and L1/L2 proactive foundations
+- StackChan/Xiaozhi smoke, latency, firmware preflight, and physical-session scripts
+
+Known limitations:
+
+- The current runtime is designed for one trusted PC and one process; distributed dedupe needs a shared store.
+- Real-device acceptance depends on the contributor's Home Assistant entities and local network.
+- WeChat delivery requires an existing Hermes WeChat adapter and remains opt-in.
+- Proactive AI is limited to L1 observation and L2 confirmation; it does not auto-execute actions.
+
+See [current status](docs/CURRENT_STATUS.md) and the [roadmap](docs/ROADMAP.md) for the engineering backlog.
+
+## Requirements
+
+- Node.js `20.19+` or `22.12+`
+- npm
+- Optional: Home Assistant with a least-privilege long-lived token
+- Optional: a local Hermes/Jarvis Agent runtime
+- Optional: Xiaozhi Server and StackChan hardware
 
 ## Quick Start
 
 ```bash
-npm install
+git clone https://github.com/18861870889/this-is-javis-2.git
+cd this-is-javis-2
+npm ci
 cp .env.example .env
 npm run dev
 ```
 
-Default service URL:
+Open `http://127.0.0.1:5173`. Jarvis binds to localhost and uses `dry_run` by default.
 
-```text
-http://localhost:5173
-```
-
-Jarvis binds to `127.0.0.1` by default. Do not expose HTTP, WebSocket, MCP, STT/TTS, or LLM gateway ports directly to the public internet. See [Security Baseline](docs/SECURITY_BASELINE.md) before using `JARVIS_BIND_HOST=0.0.0.0` for LAN devices.
-
-For first real-home testing, keep execution in dry-run mode:
+Verify a clean checkout before changing configuration:
 
 ```bash
-HARNESS_EXECUTION_MODE=dry_run npm run dev
+npm run test:ci
 ```
 
-Optional StackChan room registry:
+For Home Assistant, add only local values to the ignored `.env` file:
 
 ```bash
-JARVIS_STACKCHAN_DEVICE_ROOMS='{"stackchan-study":"study","stackchan-second":"second"}'
+HARNESS_EXECUTION_MODE=dry_run
+HA_BASE_URL=http://homeassistant.local:8123
+HA_TOKEN=replace-with-a-least-privilege-token
 ```
 
-First StackChan MCP dry-run:
+Do not switch to `HARNESS_EXECUTION_MODE=real` until dry-run logs resolve the intended room, entity, capability, and action.
 
-```bash
-JARVIS_BIND_HOST=127.0.0.1 \
-PORT=5183 \
-HARNESS_EXECUTION_MODE=dry_run \
-JARVIS_MCP_ALLOWED_ROOM_IDS=second \
-JARVIS_MCP_REQUIRE_TEXT_PATTERN='次卧' \
-JARVIS_STACKCHAN_DEVICE_ROOMS='{"stackchan-second":"second"}' \
-npm run dev
-```
+## Xiaozhi Integration
 
-See [Jarvis MCP Bridge](docs/JARVIS_MCP_BRIDGE.md) for the real-execution gate.
-
-Xiaozhi local Server can keep its ASR/TTS pipeline and use Jarvis as the brain by configuring an OpenAI-compatible LLM:
+Keep Xiaozhi's voice modules and point only its OpenAI-compatible LLM provider to Jarvis:
 
 ```yaml
 selected_module:
@@ -74,77 +105,81 @@ selected_module:
 LLM:
   JarvisLLM:
     type: openai
-    base_url: http://<jarvis-lan-ip>:5183/v1
+    base_url: http://<jarvis-host>:5183/v1
     model_name: jarvis
-    api_key: dummy
+    api_key: placeholder-not-a-real-secret
 ```
 
-Jarvis then receives Xiaozhi's LLM calls at `/v1/chat/completions`. Jarvis Brain recognizes the intent first: home tasks become `HomeIntent` and enter HCM/HA, while non-home tasks go to Hermes/Jarvis Agent or approved local tools. Delivery Router is responsible for the final voice/WeChat/audit handoff.
+The complete setup and physical acceptance flow is in the [Xiaozhi/StackChan runbook](docs/XIAOZHI_STACKCHAN_RUNBOOK.md).
 
-## Important Environment Variables
+## Configuration
 
-```bash
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o-mini
-JARVIS_BIND_HOST=127.0.0.1
-PORT=5173
-HARNESS_EXECUTION_MODE=dry_run
-HA_BASE_URL=http://homeassistant.local:8123
-HA_TOKEN=
-HERMES_API_BASE_URL=
-HERMES_API_KEY=
-```
+The documented configuration surface lives in [.env.example](.env.example). Common settings are:
 
-Never commit `.env`, HA tokens, OpenAI/TTS/STT keys, local audit logs, Home Assistant snapshots, tunnel credentials, or firmware full-flash backups.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `JARVIS_BIND_HOST` | `127.0.0.1` | HTTP bind address |
+| `PORT` | `5173` | Jarvis port |
+| `HARNESS_EXECUTION_MODE` | `dry_run` | `dry_run` or intentional real execution |
+| `HA_BASE_URL` / `HA_TOKEN` | empty | Home Assistant connection |
+| `HERMES_API_BASE_URL` | empty | Hermes/Jarvis Agent endpoint |
+| `JARVIS_STACKCHAN_DEVICE_ROOMS` | empty | Trusted device-to-room placement map |
+| `JARVIS_PC_WORKSPACE_ROOT` | local data path | Restricted PC file workspace |
+
+Never commit `.env`, HA tokens, Xiaozhi endpoint tokens, LLM/STT/TTS keys, private URLs, Home Assistant snapshots, local audit logs, or firmware backups.
 
 ## Verification
 
-Run focused Jarvis/HCM verification:
-
 ```bash
-npm test -- --run src/jarvisBrain.test.js src/jarvisVoiceBridge.test.js src/jarvisLearningFeedback.test.js src/jarvisPendingPromptQueue.test.js src/jarvisServerRoutes.test.js src/hcmStateQuery.test.js src/automationSuggestionEngine.test.js src/learningLayer.test.js src/hcmPlanner.test.js src/proactiveOpportunityDetector.test.js src/policyEngine.test.js
+npm run check       # JavaScript syntax checks
+npm test            # full Vitest regression
+npm run build       # production frontend build
+npm run test:ci     # all required local CI checks
 ```
 
-Run full regression:
+With a local stack running:
 
 ```bash
-npm test -- --run
+npm run jarvis:stack:check
+npm run jarvis:stack:e2e
+JARVIS_URL=http://127.0.0.1:5183 npm run jarvis:latency
 ```
 
-Syntax checks:
-
-```bash
-node --check server.mjs
-node --check scripts/jarvis-latency-smoke.mjs
-```
-
-Latency smoke against a running local service:
-
-```bash
-JARVIS_URL=http://127.0.0.1:5173 npm run jarvis:latency
-```
+Hardware and real-control checks are intentionally separate because they require local devices and explicit approval.
 
 ## Repository Layout
 
 ```text
 .
-├── server.mjs                    # Express/Vite server, HCM routes, Jarvis voice routes
-├── src/                          # React UI, HCM core, HA adapter, learning, proactive detector
-│   ├── adapters/                 # Home Assistant and provider adapter code
-│   ├── jarvisVoiceBridge.js      # Voice routing, dedupe keys, StackChan response shape
-│   ├── jarvisPendingPromptQueue.js
-│   ├── jarvisLearningFeedback.js
-│   ├── proactiveOpportunityDetector.js
-│   ├── hcmPlanner.js
-│   └── policyEngine.js
-├── scripts/
-│   └── jarvis-latency-smoke.mjs
-└── docs/
-    ├── JARVIS_ENGINEERING_CONTROL.md
-    ├── JARVIS_VERIFICATION_PLAN.md
-    └── JARVIS_STACKCHAN_HTTP_BRIDGE.md
+├── server.mjs               # Express/Vite service and public API routes
+├── src/
+│   ├── adapters/            # Home Assistant and provider adapters
+│   ├── jarvisBrain.js       # top-level intent classification
+│   ├── hcm*.js              # home-control model, validation, and execution
+│   ├── deliveryRouter.js    # voice/WeChat/audit delivery boundary
+│   └── *.test.js            # unit and integration tests
+├── scripts/                 # local stack, smoke, latency, and firmware tools
+├── docs/                    # architecture, operations, security, and roadmap
+└── .github/                 # CI, security automation, and contribution templates
 ```
 
-## Public-Repo Boundary
+## Documentation
 
-This public repository intentionally excludes local runtime data, build outputs, installed dependencies, private `.env` files, personal Hermes persona files, legacy device-control scripts, and device flash backups. StackChan firmware/device code is kept in a separate firmware repository.
+- [Product requirements](docs/PRD.md)
+- [Engineering control](docs/JARVIS_ENGINEERING_CONTROL.md)
+- [HCM control graph](docs/HCM_CONTROL_GRAPH.md)
+- [Security baseline](docs/SECURITY_BASELINE.md)
+- [Verification plan](docs/JARVIS_VERIFICATION_PLAN.md)
+- [Testing policy](docs/TESTING_POLICY.md)
+- [Adapter SDK](docs/ADAPTER_SDK.md)
+- [Roadmap](docs/ROADMAP.md)
+
+## Contributing And Security
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Use GitHub Issues for reproducible bugs and scoped proposals. Do not post vulnerabilities, credentials, camera details, device identifiers, or private home topology in a public issue; follow [SECURITY.md](SECURITY.md) instead.
+
+This public repository intentionally excludes runtime data, personal Hermes files, real credentials, local device snapshots, and firmware full-flash backups.
+
+## License
+
+[MIT](LICENSE)

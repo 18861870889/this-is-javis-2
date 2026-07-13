@@ -1,4 +1,5 @@
-import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
@@ -11,9 +12,9 @@ const timeoutMs = positiveInteger(args.values["timeout-ms"] || process.env.STACK
 const timestamp = compactTimestamp(new Date());
 const sessionRoot = resolvePath(args.values["session-root"] || process.env.STACKCHAN_PHYSICAL_SESSION_ROOT || "data/stackchan-physical-sessions");
 const sessionDir = resolve(sessionRoot, `${timestamp}-${scenario}`);
-const devicePort = args.values.port || process.env.STACKCHAN_PORT || "/dev/cu.usbmodem31201";
+const devicePort = args.values.port || process.env.STACKCHAN_PORT || findDevicePort();
 const baud = positiveInteger(args.values.baud || process.env.STACKCHAN_SERIAL_BAUD, 115_200);
-const idfExport = args.values["idf-export"] || process.env.IDF_EXPORT || "/Users/jerf/esp/esp-idf-v5.5.4/export.sh";
+const idfExport = args.values["idf-export"] || process.env.IDF_EXPORT || findIdfExport();
 const firmwareRoot = resolvePath(args.values["firmware-root"] || process.env.STACKCHAN_FIRMWARE_ROOT || "../stackchan-jarvis-firmware/firmware");
 const requireTrigger = !args.flags.has("no-require-trigger") && process.env.STACKCHAN_PHYSICAL_SESSION_REQUIRE_TRIGGER !== "false";
 const requireRealHa = args.flags.has("require-real-ha") || process.env.STACKCHAN_PHYSICAL_SESSION_REQUIRE_REAL_HA === "true";
@@ -62,13 +63,15 @@ if (dryRun) {
 }
 
 let serialProcess = null;
-if (!noSerial && !externalSerialLog && existsSync(devicePort)) {
+if (!noSerial && !externalSerialLog && existsSync(devicePort) && existsSync(idfExport)) {
   serialProcess = startSerialCapture(serialLog);
   await sleep(800);
 } else if (!noSerial && externalSerialLog) {
   console.log(`Using existing serial log: ${serialLog}`);
+} else if (!noSerial && devicePort && existsSync(devicePort) && !existsSync(idfExport)) {
+  console.log("Serial capture skipped because ESP-IDF export.sh was not found. Set IDF_EXPORT explicitly.");
 } else if (!noSerial) {
-  console.log(`Serial capture skipped because device port is not present: ${devicePort}`);
+  console.log(`Serial capture skipped because no StackChan port was found. Set STACKCHAN_PORT explicitly.`);
 } else {
   console.log("Serial capture disabled by --no-serial.");
 }
@@ -297,6 +300,31 @@ function parseArgs(argv) {
 function resolvePath(path) {
   if (!path) return "";
   return path.startsWith("/") ? path : resolve(repoRoot, path);
+}
+
+function findDevicePort() {
+  try {
+    const candidate = readdirSync("/dev")
+      .filter((name) => /^(cu\.usbmodem|ttyACM|ttyUSB)/.test(name))
+      .sort()[0];
+    return candidate ? resolve("/dev", candidate) : "";
+  } catch {
+    return "";
+  }
+}
+
+function findIdfExport() {
+  const espRoot = resolve(homedir(), "esp");
+  try {
+    return readdirSync(espRoot)
+      .filter((name) => name.startsWith("esp-idf"))
+      .map((name) => resolve(espRoot, name, "export.sh"))
+      .filter(existsSync)
+      .sort()
+      .reverse()[0] || "";
+  } catch {
+    return "";
+  }
 }
 
 function compactTimestamp(date) {

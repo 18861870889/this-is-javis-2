@@ -4,9 +4,9 @@ This runbook covers the local StackChan -> Xiaozhi Server -> Jarvis -> Home Assi
 
 ## Scope
 
-- PC Jarvis repo: `/Users/jerf/Documents/this is javis 2`
-- Xiaozhi Server repo: `/Users/jerf/Documents/xiaozhi-esp32-server-jarvis/main/xiaozhi-server`
-- StackChan firmware repo: `/Users/jerf/Documents/stackchan-jarvis-firmware`
+- PC Jarvis repo: `/path/to/this-is-javis-2`
+- Xiaozhi Server repo: `/path/to/xiaozhi-esp32-server/main/xiaozhi-server`
+- StackChan firmware repo: `/path/to/stackchan-jarvis-firmware`
 - Jarvis default port: `5183`
 - Jarvis default bind host: `127.0.0.1`
 - Jarvis brain endpoint: `POST /v1/chat/completions`
@@ -24,8 +24,8 @@ StackChan mic/speaker
      - TTS
      - WebSocket/OTA service for StackChan
   -> Jarvis OpenAI-compatible /v1/chat/completions
-     - HCM routing and policy
-     - Home Assistant dry-run or real execution gate
+     - Brain intent recognition and semantic planning
+     - HCM safety policy, dry-run, execution, verification, and audit
      - restricted PC tool routing
   -> Home Assistant or PC workspace
 ```
@@ -60,7 +60,7 @@ Pass criteria:
 Preferred managed commands:
 
 ```bash
-cd "/Users/jerf/Documents/this is javis 2"
+cd "/path/to/this-is-javis-2"
 
 npm run jarvis:stack:check
 npm run jarvis:stack:start
@@ -73,7 +73,7 @@ The managed stack starts Jarvis on `127.0.0.1:5183` and Xiaozhi Server on `0.0.0
 Start Jarvis manually with dry-run defaults only when debugging the stack script:
 
 ```bash
-cd "/Users/jerf/Documents/this is javis 2"
+cd "/path/to/this-is-javis-2"
 
 JARVIS_BIND_HOST=127.0.0.1 \
 PORT=5183 \
@@ -121,7 +121,7 @@ Use `http://127.0.0.1:5183/v1` only when Xiaozhi and Jarvis run on the same host
 Current local override path:
 
 ```text
-/Users/jerf/Documents/xiaozhi-esp32-server-jarvis/main/xiaozhi-server/data/.config.yaml
+/path/to/xiaozhi-esp32-server/main/xiaozhi-server/data/.config.yaml
 ```
 
 Current OTA self-check:
@@ -133,7 +133,7 @@ curl -fsS http://127.0.0.1:8003/xiaozhi/ota/
 Expected response includes:
 
 ```text
-ws://192.168.31.99:8000/xiaozhi/v1/
+ws://<xiaozhi-lan-ip>:8000/xiaozhi/v1/
 ```
 
 Xiaozhi acceptance checks:
@@ -158,7 +158,7 @@ Do not flash yet. First verify the local Xiaozhi Server can reach Jarvis and can
 Firmware repo:
 
 ```bash
-cd "/Users/jerf/Documents/stackchan-jarvis-firmware"
+cd "/path/to/stackchan-jarvis-firmware"
 ```
 
 Before any flashing or OTA change:
@@ -202,7 +202,7 @@ Phase 1: one low-risk allowlisted room or device.
 - Enable real execution only for the session being tested. Preferred command:
 
 ```bash
-cd "/Users/jerf/Documents/this is javis 2"
+cd "/path/to/this-is-javis-2"
 npm run jarvis:stack:stop
 npm run jarvis:stack:real-second
 ```
@@ -237,7 +237,7 @@ Phase 2: full-home low-risk delivery mode for user acceptance.
 Preferred command for handoff testing:
 
 ```bash
-cd "/Users/jerf/Documents/this is javis 2"
+cd "/path/to/this-is-javis-2"
 npm run jarvis:stack:stop
 npm run jarvis:stack:check:real-home
 npm run jarvis:stack:real-home
@@ -325,7 +325,7 @@ Run this checklist before any new OTA or flash step, and after every stack/serve
 Local non-destructive chain check:
 
 ```bash
-cd "/Users/jerf/Documents/this is javis 2"
+cd "/path/to/this-is-javis-2"
 npm run jarvis:stack:e2e
 npm run xiaozhi:ws-smoke
 ```
@@ -398,38 +398,30 @@ npm run xiaozhi:ws-smoke
 npm test -- --run src/jarvisServerRoutes.test.js src/jarvisVoiceBridge.test.js src/policyEngine.test.js src/skipPlanner.test.js
 ```
 
-Observed results:
+Expected results:
 
-- Xiaozhi Python venv exists and imports Torch, FunASR, EdgeTTS, OpenAI SDK, and Opus successfully.
-- SenseVoiceSmall `model.pt` exists at `936291369` bytes with SHA-256 `833ca2dcfdf8ec91bd4f31cfac36d6124e0c459074d5e909aec9cabe6204a3ea`.
-- Jarvis runtime gate is clean after local `.env` migration; HA adapter reports configured.
-- Dry-run utterance `打开次卧吸顶灯` returns: `这是预览：会操作 次卧吸顶灯，不会控制真实设备。`
-- PC tool utterance creates `data/pc-workspace.local/hello.md` with `helloworld`.
-- `real-second` utterance `打开次卧吸顶灯` executed `switch.turn_on` for `switch.topwit_cn_1110296386_rzw33_on_p_3_1`.
-- Read-back utterance confirmed: `次卧吸顶灯开着`.
-- Guard check `打开主卧灯` returns HTTP `403` in `real-second` mode because it does not match the allowed text pattern.
-- `jarvis:stack:e2e` passes for Jarvis runtime, Xiaozhi OTA, MCP manifest, read-only HA query, and restricted PC Markdown creation.
-- `xiaozhi:ws-smoke` passes with simulated StackChan WebSocket device ID `80:45:6b:4d:da:d0`: home state prompt returned TTS text for second-bedroom light state and `24668` TTS audio bytes; PC Markdown prompt created `xiaozhi-ws-smoke-1783295652919.md`, returned spoken progress text, and `26479` TTS audio bytes.
-- Guarded real-control e2e opened `次卧吸顶灯`, read back `次卧吸顶灯开着`, then the manual restore command closed it and read back all second-bedroom lights off.
-- `jarvis:latency` in real-second-compatible mode reports duplicate p95 `3ms` against the `100ms` budget.
-- Focused Vitest regression passes: 4 files, 32 tests.
+- Xiaozhi's Python environment imports the configured ASR, VAD, TTS, OpenAI-compatible SDK, and Opus dependencies.
+- Jarvis runtime reports the intended execution mode and whether Home Assistant is configured.
+- A dry-run home command names the resolved entity but does not call a real HA service.
+- The restricted PC tool creates a Markdown file only inside `JARVIS_PC_WORKSPACE_ROOT`.
+- `jarvis:stack:e2e` passes runtime, OTA, MCP manifest, read-only HA query, and PC workspace checks.
+- `xiaozhi:ws-smoke` receives recognized text, a Jarvis response, TTS text, and non-empty TTS audio.
+- A guarded real-control test changes only the allowlisted low-risk device and verifies the state afterward.
+- The full Vitest regression and production build pass.
 
-Current firmware candidate:
+Firmware candidate checks:
 
-- Firmware build directory: `/Users/jerf/Documents/stackchan-jarvis-firmware/firmware/build-xiaohei-local`.
-- The build loaded `sdkconfig.defaults.jarvis` plus ignored `sdkconfig.defaults.local`.
-- `sdkconfig.h` shows `CONFIG_USE_CUSTOM_WAKE_WORD=1`, `CONFIG_CUSTOM_WAKE_WORD="xiao hei"`, `CONFIG_CUSTOM_WAKE_WORD_DISPLAY="小黑"`, `CONFIG_SR_MN_CN_MULTINET7_QUANT=1`, and local `CONFIG_OTA_URL`.
-- `stack-chan.bin` is `3787120` bytes; the app partition check reports 27% free.
-- `generated_assets.bin` is `4688585` bytes, below the 5MB assets partition.
-- Firmware artifact SHA-256: `stack-chan.bin` = `e08ff7de5a70c991ce843d43f002fd355874b6f3f7054e95d4b7c70f443ef427`; `generated_assets.bin` = `ccd7d1ef488aa07eb4f5c982084db9515bc902f588c6c3ba2ec193070315cbfe`.
-- The app binary contains the Jarvis auto-start marker plus head-touch manual listening start/stop markers.
-- Read-only device checks on `/dev/cu.usbmodem31201` report ESP32-S3, MAC `80:45:6b:4d:da:d0`, and detected flash size 16MB.
-- This candidate has already been flashed successfully. The last flash verified all written segments and hard-reset the device.
+- The build uses committed Jarvis defaults plus an ignored local configuration for private network values.
+- `sdkconfig.h` enables the `小黑` wake word, Chinese MultiNet, and a locally configured OTA endpoint.
+- App and asset binaries remain below their partition limits.
+- Optional expected SHA-256 values can be supplied through `.env` or the shell for a known release candidate.
+- `STACKCHAN_EXPECTED_MAC` can pin a physical-device check without publishing the device identifier.
+- Flash and rollback remain blocked until their explicit approval environment variables are present.
 
 Firmware gate commands:
 
 ```bash
-cd "/Users/jerf/Documents/this is javis 2"
+cd "/path/to/this-is-javis-2"
 npm run stackchan:firmware:preflight
 ```
 
@@ -446,7 +438,7 @@ This checks the StackChan USB port, chip ID, MAC allowlist, and 16MB flash size 
 Flash is intentionally guarded and must not be run without explicit approval:
 
 ```bash
-cd "/Users/jerf/Documents/this is javis 2"
+cd "/path/to/this-is-javis-2"
 JARVIS_STACKCHAN_FLASH_APPROVED=I_UNDERSTAND_THIS_WRITES_DEVICE \
   npm run stackchan:firmware:flash
 ```
@@ -454,7 +446,7 @@ JARVIS_STACKCHAN_FLASH_APPROVED=I_UNDERSTAND_THIS_WRITES_DEVICE \
 Rollback is also guarded:
 
 ```bash
-cd "/Users/jerf/Documents/this is javis 2"
+cd "/path/to/this-is-javis-2"
 JARVIS_STACKCHAN_ROLLBACK_APPROVED=I_UNDERSTAND_THIS_WRITES_DEVICE \
   npm run stackchan:firmware:rollback
 ```

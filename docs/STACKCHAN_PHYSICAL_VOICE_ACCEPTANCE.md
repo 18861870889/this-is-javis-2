@@ -34,7 +34,7 @@ Note: Xiaozhi currently does not emit a dedicated per-utterance `ASR started` lo
 Start the local stack. For engineering smoke, use `real-second`; for user handoff testing, use `real-home`.
 
 ```bash
-cd "/Users/jerf/Documents/this is javis 2"
+cd "/path/to/this-is-javis-2"
 npm run jarvis:stack:status
 ```
 

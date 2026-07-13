@@ -1,0 +1,11 @@
+# Default maintainer review for repository changes.
+* @18861870889
+
+# Safety-sensitive boundaries.
+/server.mjs @18861870889
+/src/hcm*.js @18861870889
+/src/policyEngine.js @18861870889
+/src/adapters/ @18861870889
+/scripts/stackchan-firmware-gate.mjs @18861870889
+/docs/SECURITY_BASELINE.md @18861870889
+/SECURITY.md @18861870889

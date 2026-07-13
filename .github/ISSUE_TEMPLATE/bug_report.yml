@@ -1,0 +1,106 @@
+name: Bug report
+description: Report reproducible incorrect Jarvis behavior
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Reproduce with the simulator or dry-run whenever possible.
+        **Do not include secrets, private HA URLs/IPs, identifying device/entity data, camera or microphone data, voice transcripts, floor plans, snapshots, or unredacted logs.** Report vulnerabilities through SECURITY.md instead.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Jarvis Brain or intent routing
+        - HCM planning, policy, or execution
+        - Home Assistant adapter
+        - StackChan/Xiaozhi bridge or voice ingress
+        - Simulator or test harness
+        - Web interface
+        - Delivery or restricted PC tools
+        - Documentation or tooling
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the actual behavior and its user impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Safe reproduction
+      description: Provide minimal sanitized steps. Keep execution in simulator/dry-run; never trigger a real device just to reproduce a bug.
+      placeholder: |
+        1. Set HARNESS_EXECUTION_MODE=dry_run
+        2. Use a synthetic room and entity...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: execution-mode
+    attributes:
+      label: Validation mode
+      options:
+        - Simulator or fixture
+        - Dry-run
+        - Read-only Home Assistant
+        - Explicitly authorized real-device test
+        - Not applicable
+        - Unknown
+    validations:
+      required: true
+
+  - type: input
+    id: revision
+    attributes:
+      label: Jarvis revision
+      description: Release, branch, or commit SHA.
+      placeholder: main at abc1234
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node.js version, browser if relevant, and sanitized HA/Xiaozhi version. Do not include hostnames, URLs, or device identifiers.
+      placeholder: macOS 15, Node.js 22.12, Chrome 138
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or evidence
+      description: Optional. Redact authorization, tokens, private addresses, names, commands, entity/device IDs, and household data before pasting.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checklist
+      options:
+        - label: I searched existing issues and can reproduce this on the current default branch.
+          required: true
+        - label: I removed credentials and private household/device data from this report.
+          required: true
+        - label: This is not a vulnerability report or a request to enable a protected device capability.
+          required: true

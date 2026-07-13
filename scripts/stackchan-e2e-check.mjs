@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const jarvisBaseUrl = process.env.JARVIS_BASE_URL || "http://127.0.0.1:5183";
 const xiaozhiOtaUrl = process.env.XIAOZHI_OTA_URL || "http://127.0.0.1:8003/xiaozhi/ota/";
+const expectedXiaozhiWsUrl = process.env.XIAOZHI_EXPECTED_WS_URL || "";
 const pcWorkspaceRoot = resolve(repoRoot, process.env.JARVIS_PC_WORKSPACE_ROOT || "data/pc-workspace.local");
 const args = new Set(process.argv.slice(2));
 const includeRealControl = args.has("--real-control");
@@ -43,11 +44,16 @@ async function checkJarvisRuntime() {
 async function checkXiaozhiOta() {
   const response = await getText(xiaozhiOtaUrl, "Xiaozhi OTA");
   if (!response) return;
-  if (!/ws:\/\/192\.168\.31\.99:8000\/xiaozhi\/v1\//.test(response)) {
-    errors.push(`Xiaozhi OTA did not return the expected LAN WebSocket endpoint. Response: ${response}`);
+  const endpoint = response.match(/wss?:\/\/[^\s"']+\/xiaozhi\/v1\/?/)?.[0] || "";
+  if (!endpoint) {
+    errors.push(`Xiaozhi OTA did not return a Xiaozhi WebSocket endpoint. Response: ${response}`);
     return;
   }
-  checks.push("Xiaozhi OTA returns ws://192.168.31.99:8000/xiaozhi/v1/.");
+  if (expectedXiaozhiWsUrl && endpoint !== expectedXiaozhiWsUrl) {
+    errors.push(`Xiaozhi OTA returned ${endpoint}, expected ${expectedXiaozhiWsUrl}.`);
+    return;
+  }
+  checks.push(`Xiaozhi OTA returns ${endpoint}.`);
 }
 
 async function checkMcpManifest() {

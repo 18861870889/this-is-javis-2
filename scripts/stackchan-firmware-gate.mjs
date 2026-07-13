@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -7,12 +8,14 @@ import { spawnSync } from "node:child_process";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const firmwareRoot = resolve(process.env.STACKCHAN_FIRMWARE_ROOT || resolve(repoRoot, "../stackchan-jarvis-firmware/firmware"));
 const buildDir = resolve(process.env.STACKCHAN_BUILD_DIR || resolve(firmwareRoot, "build-xiaohei-local"));
-const devicePort = process.env.STACKCHAN_PORT || "/dev/cu.usbmodem31201";
-const idfExport = process.env.IDF_EXPORT || "/Users/jerf/esp/esp-idf-v5.5.4/export.sh";
-const backupPath = process.env.STACKCHAN_FULLFLASH_BACKUP || "/Users/jerf/Documents/stackchan-firmware-backups/stackchan-fullflash-16mb-20260705-211317.bin";
-const expectedBackupSha256 = process.env.STACKCHAN_FULLFLASH_BACKUP_SHA256 || "bf0d8b35e0431e3a16abbea730df090dbc197e96d985c6548c0a3c6ab4db4825";
-const expectedAppSha256 = process.env.STACKCHAN_APP_SHA256 || "04303c0060f39a7226317b482e7a1a00ab8947296151d3e3aee84018e15dada1";
-const expectedAssetsSha256 = process.env.STACKCHAN_ASSETS_SHA256 || "ccd7d1ef488aa07eb4f5c982084db9515bc902f588c6c3ba2ec193070315cbfe";
+const devicePort = process.env.STACKCHAN_PORT || findDevicePort();
+const idfExport = process.env.IDF_EXPORT || findIdfExport();
+const backupPath = process.env.STACKCHAN_FULLFLASH_BACKUP || findLatestFullFlashBackup();
+const expectedDeviceMac = String(process.env.STACKCHAN_EXPECTED_MAC || "").trim();
+const expectedOtaUrl = String(process.env.STACKCHAN_EXPECTED_OTA_URL || "").trim();
+const expectedBackupSha256 = process.env.STACKCHAN_FULLFLASH_BACKUP_SHA256 || "";
+const expectedAppSha256 = process.env.STACKCHAN_APP_SHA256 || "";
+const expectedAssetsSha256 = process.env.STACKCHAN_ASSETS_SHA256 || "";
 const appPartitionBytes = Number(process.env.STACKCHAN_APP_PARTITION_BYTES || 0x4f0000);
 const assetsPartitionBytes = Number(process.env.STACKCHAN_ASSETS_PARTITION_BYTES || 5 * 1024 * 1024);
 
@@ -44,6 +47,7 @@ async function preflight({ requireCandidate = true } = {}) {
   const checks = [];
   const errors = [];
 
+  addFileCheck(checks, errors, "ESP-IDF export script", idfExport, "file");
   addFileCheck(checks, errors, "Firmware root", firmwareRoot, "directory");
   addFileCheck(checks, errors, "Full-flash backup", backupPath, "file");
   if (existsSync(backupPath)) {
@@ -87,7 +91,12 @@ async function deviceCheck() {
     if (!chipId.ok) errors.push(`chip_id failed: ${chipId.output}`);
     else {
       requireOutput(chipId.output, /ESP32-S3/, "chip_id did not report ESP32-S3", errors);
-      requireOutput(chipId.output, /MAC:\s*80:45:6b:4d:da:d0/i, "chip_id MAC did not match the allowlisted StackChan.", errors);
+      if (expectedDeviceMac) {
+        const normalizedOutput = chipId.output.toLowerCase();
+        if (!normalizedOutput.includes(`mac: ${expectedDeviceMac.toLowerCase()}`)) {
+          errors.push("chip_id MAC did not match STACKCHAN_EXPECTED_MAC.");
+        }
+      }
     }
 
     const flashId = runIdfCommand(`python -m esptool --chip esp32s3 --port ${shellQuote(devicePort)} --baud 115200 flash_id`, { allowFailure: true });
@@ -124,8 +133,11 @@ function inspectCandidate(checks, errors) {
     requireOutput(config, /CONFIG_CUSTOM_WAKE_WORD_DISPLAY "小黑"/, "Candidate wake-word display is not 小黑.", errors);
     requireOutput(config, /CONFIG_CUSTOM_WAKE_WORD_THRESHOLD 10/, "Candidate wake-word threshold is not the Jarvis sensitivity value 10.", errors);
     requireOutput(config, /CONFIG_SR_MN_CN_MULTINET7_QUANT 1/, "Candidate does not include Chinese MultiNet7.", errors);
-    requireOutput(config, /CONFIG_OTA_URL "http:\/\/192\.168\.31\.99:8003\/xiaozhi\/ota\/"/, "Candidate OTA URL is not the current local Xiaozhi endpoint.", errors);
-    checks.push("Candidate sdkconfig.h contains 小黑 + local OTA settings.");
+    requireOutput(config, /CONFIG_OTA_URL "[^"]+"/, "Candidate does not define an OTA URL.", errors);
+    if (expectedOtaUrl && !config.includes(`CONFIG_OTA_URL "${expectedOtaUrl}"`)) {
+      errors.push("Candidate OTA URL does not match STACKCHAN_EXPECTED_OTA_URL.");
+    }
+    checks.push("Candidate sdkconfig.h contains 小黑 + OTA settings.");
   }
 
   if (existsSync(appBin)) {
@@ -195,6 +207,10 @@ function requireRollbackApproval() {
 }
 
 function addFileCheck(checks, errors, label, path, type) {
+  if (!path) {
+    errors.push(`${label} is not configured or could not be auto-detected.`);
+    return;
+  }
   if (!existsSync(path)) {
     errors.push(`${label} missing: ${path}`);
     return;
@@ -215,6 +231,45 @@ function inspectFile(path) {
 
 function requireOutput(output, pattern, message, errors) {
   if (!pattern.test(output)) errors.push(message);
+}
+
+function findDevicePort() {
+  try {
+    const candidate = readdirSync("/dev")
+      .filter((name) => /^(cu\.usbmodem|ttyACM|ttyUSB)/.test(name))
+      .sort()[0];
+    return candidate ? resolve("/dev", candidate) : "";
+  } catch {
+    return "";
+  }
+}
+
+function findIdfExport() {
+  const espRoot = resolve(homedir(), "esp");
+  try {
+    const candidates = readdirSync(espRoot)
+      .filter((name) => name.startsWith("esp-idf"))
+      .map((name) => resolve(espRoot, name, "export.sh"))
+      .filter(existsSync)
+      .sort()
+      .reverse();
+    return candidates[0] || "";
+  } catch {
+    return "";
+  }
+}
+
+function findLatestFullFlashBackup() {
+  const backupRoot = resolve(homedir(), "Documents/stackchan-firmware-backups");
+  try {
+    return readdirSync(backupRoot)
+      .filter((name) => name.endsWith(".bin"))
+      .map((name) => resolve(backupRoot, name))
+      .filter((path) => statSync(path).isFile())
+      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0] || "";
+  } catch {
+    return "";
+  }
 }
 
 function runIdfCommand(commandLine, { cwd = firmwareRoot, allowFailure = false } = {}) {

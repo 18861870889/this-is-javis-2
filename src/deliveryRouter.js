@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 
 export const DELIVERY_ROUTER_VERSION = "0.1";
 
@@ -124,9 +126,9 @@ export function createDeliveryMessage({
 export function createHermesWechatSender({
   enabled = parseBoolean(process.env.JARVIS_DELIVERY_WECHAT_ENABLED),
   command = process.env.JARVIS_HERMES_WECHAT_COMMAND || "",
-  hermesHome = process.env.HERMES_HOME || "/Users/jerf/.hermes",
-  hermesAgentRoot = process.env.JARVIS_HERMES_AGENT_ROOT || "/Users/jerf/.hermes/hermes-agent",
-  python = process.env.JARVIS_HERMES_PYTHON || "/Users/jerf/.hermes/hermes-agent/venv/bin/python3",
+  hermesHome = process.env.HERMES_HOME || resolve(homedir(), ".hermes"),
+  hermesAgentRoot = process.env.JARVIS_HERMES_AGENT_ROOT || resolve(hermesHome, "hermes-agent"),
+  python = process.env.JARVIS_HERMES_PYTHON || resolve(hermesAgentRoot, "venv/bin/python3"),
   target = process.env.JARVIS_DELIVERY_WECHAT_TARGET || "weixin",
   timeoutMs = Number(process.env.JARVIS_HERMES_WECHAT_TIMEOUT_MS || 8000),
   cwd = process.env.JARVIS_HERMES_WECHAT_CWD || process.cwd(),

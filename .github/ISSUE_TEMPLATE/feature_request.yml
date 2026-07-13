@@ -1,0 +1,88 @@
+name: Feature request
+description: Propose an improvement to Jarvis, HCM, HA integration, or its bridges
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem before the implementation. Proposals that can affect a home or physical device must preserve Jarvis's local, policy-gated, dry-run-first model.
+        Do not include secrets, real household topology, identifying device data, camera/microphone content, or private logs.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Who needs this, and what cannot they do safely today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe observable behavior and the smallest useful scope. Avoid relying on a specific private HA setup.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Project area
+      multiple: true
+      options:
+        - Jarvis Brain or intent routing
+        - HCM model, planning, or policy
+        - Home Assistant adapter
+        - StackChan/Xiaozhi bridge or voice ingress
+        - Simulator, tests, or observability
+        - Web interface
+        - Delivery or restricted PC tools
+        - Documentation or contributor experience
+    validations:
+      required: true
+
+  - type: dropdown
+    id: safety-impact
+    attributes:
+      label: Safety and privacy impact
+      description: Select every boundary this proposal could affect.
+      multiple: true
+      options:
+        - No device or private-data impact
+        - Read-only provider or household data
+        - Dry-run or simulation behavior
+        - Real Home Assistant execution
+        - Network, authentication, or bridge exposure
+        - StackChan/Xiaozhi physical or firmware behavior
+        - Camera, microphone, lock, alarm, gas, water, or another protected capability
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: safeguards
+    attributes:
+      label: Proposed safeguards
+      description: Explain dry-run evidence, authorization, policy gates, audit, rollback, data minimization, and tests that apply. Write "Not applicable" when there is no safety impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include a smaller or simulator-only option when relevant.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and documentation for this request.
+          required: true
+        - label: I removed credentials and private household/device data.
+          required: true
+        - label: I understand that protected capabilities require separate threat review and authorization design.
+          required: true

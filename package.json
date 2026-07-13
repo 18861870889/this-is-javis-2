@@ -1,7 +1,21 @@
 {
   "name": "harness-house-jarvis",
   "version": "0.1.0",
+  "description": "A local-first Jarvis brain for StackChan, Xiaozhi, Home Assistant, and PC tasks.",
   "private": true,
+  "license": "MIT",
+  "author": "jerf",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/18861870889/this-is-javis-2.git"
+  },
+  "bugs": {
+    "url": "https://github.com/18861870889/this-is-javis-2/issues"
+  },
+  "homepage": "https://github.com/18861870889/this-is-javis-2#readme",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "type": "module",
   "scripts": {
     "dev": "node server.mjs",
@@ -9,6 +23,8 @@
     "dev:vite:lan": "vite --host 0.0.0.0",
     "build": "vite build",
     "test": "vitest run",
+    "check": "find server.mjs vite.config.js scripts src -type f \\( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \\) -print0 | xargs -0 -n1 node --check",
+    "test:ci": "npm run check && npm test && npm run build",
     "test:adapter": "vitest run src/adapters",
     "jarvis:latency": "node scripts/jarvis-latency-smoke.mjs",
     "preview": "vite preview",
@@ -35,16 +51,16 @@
     "stackchan:firmware:rollback": "node scripts/stackchan-firmware-gate.mjs rollback"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.1.1",
     "express": "^5.2.1",
     "lucide-react": "^0.468.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "three": "^0.181.2",
-    "vite": "^7.2.7"
+    "three": "^0.181.2"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
     "playwright-core": "^1.60.0",
+    "vite": "^8.1.4",
     "vitest": "^4.1.8"
   }
 }

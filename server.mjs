@@ -2,6 +2,7 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import { createServer as createHttpServer } from "node:http";
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { HOME_ASSISTANT_ADAPTER_ID, createHomeAssistantAdapter } from "./src/adapters/homeAssistantAdapter.js";
@@ -2386,9 +2387,9 @@ async function callHermesCliOneShot(utterance, { timeoutMs: overrideTimeoutMs } 
   const timeoutMs = Number.isFinite(overrideTimeoutMs) && overrideTimeoutMs > 0
     ? overrideTimeoutMs
     : Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0 ? configuredTimeoutMs : 15000;
-  const python = process.env.HERMES_CLI_PYTHON || "/Users/jerf/.hermes/hermes-agent/venv/bin/python";
-  const hermesHome = process.env.HERMES_HOME || "/Users/jerf/.hermes";
-  const hermesAgentRoot = process.env.HERMES_AGENT_ROOT || "/Users/jerf/.hermes/hermes-agent";
+  const hermesHome = process.env.HERMES_HOME || resolve(homedir(), ".hermes");
+  const hermesAgentRoot = process.env.HERMES_AGENT_ROOT || resolve(hermesHome, "hermes-agent");
+  const python = process.env.HERMES_CLI_PYTHON || resolve(hermesAgentRoot, "venv/bin/python");
   const model = process.env.HERMES_API_MODEL || "";
   const args = ["-m", "hermes_cli.main", "--oneshot", utterance.text];
   if (model && model !== "jarvis") args.push("--model", model);
