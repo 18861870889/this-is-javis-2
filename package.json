@@ -69,7 +69,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.1.1",
-    "playwright-core": "^1.60.0",
+    "playwright-core": "^1.61.1",
     "vite": "^8.1.4",
     "vitest": "^4.1.8"
   }
