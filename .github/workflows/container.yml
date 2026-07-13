@@ -1,0 +1,109 @@
+name: Container
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke-test:
+    name: Production container smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build production image
+        run: docker build --tag harness-house-jarvis:ci .
+
+      - name: Start dry-run container
+        run: |
+          docker volume create harness-house-jarvis-ci-data
+          docker run --detach \
+            --name harness-house-jarvis-ci \
+            --publish 127.0.0.1:5173:5173 \
+            --env NODE_ENV=production \
+            --env JARVIS_BIND_HOST=0.0.0.0 \
+            --env PORT=5173 \
+            --env HARNESS_EXECUTION_MODE=dry_run \
+            --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            --mount type=volume,source=harness-house-jarvis-ci-data,target=/app/data \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            harness-house-jarvis:ci
+
+      - name: Verify runtime status and homepage
+        shell: bash
+        run: |
+          status_file="$(mktemp)"
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error \
+              --output "$status_file" \
+              http://127.0.0.1:5173/api/runtime/status; then
+              break
+            fi
+
+            if [ "$attempt" -eq 30 ]; then
+              docker logs harness-house-jarvis-ci
+              exit 1
+            fi
+            sleep 2
+          done
+
+          test "$(jq -r '.execution.mode // empty' "$status_file")" = "dry_run"
+          test "$(jq -r '.storage.writable // false' "$status_file")" = "true"
+
+          for attempt in $(seq 1 15); do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' harness-house-jarvis-ci)" = "healthy" ]; then
+              break
+            fi
+            if [ "$attempt" -eq 15 ]; then
+              docker inspect harness-house-jarvis-ci
+              docker logs harness-house-jarvis-ci
+              exit 1
+            fi
+            sleep 2
+          done
+
+          docker exec harness-house-jarvis-ci node -e '
+            const fs = require("node:fs");
+            for (const path of ["/app/data/.jarvis-smoke", "/tmp/.jarvis-smoke"]) {
+              fs.writeFileSync(path, "ok");
+              fs.rmSync(path);
+            }
+            try {
+              fs.writeFileSync("/app/.jarvis-must-stay-read-only", "bad");
+              process.exit(9);
+            } catch (error) {
+              if (!["EROFS", "EACCES", "EPERM"].includes(error.code)) throw error;
+            }
+          '
+
+          headers_file="$(mktemp)"
+          homepage_file="$(mktemp)"
+          curl --fail --silent --show-error \
+            --header "Accept: text/html" \
+            --dump-header "$headers_file" \
+            --output "$homepage_file" \
+            http://127.0.0.1:5173/
+          grep --extended-regexp --ignore-case --quiet '^content-type: text/html' "$headers_file"
+          grep --extended-regexp --ignore-case --quiet '<!doctype html|<html' "$homepage_file"
+
+      - name: Clean up container
+        if: always()
+        run: |
+          docker rm --force harness-house-jarvis-ci 2>/dev/null || true
+          docker volume rm harness-house-jarvis-ci-data 2>/dev/null || true

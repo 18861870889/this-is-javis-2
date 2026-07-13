@@ -10,12 +10,16 @@ All notable changes to this project will be documented in this file. The format 
 - Structured bug and feature issue forms plus a pull request checklist.
 - GitHub Actions CI, CodeQL scanning, Dependabot updates, and CODEOWNERS.
 - Portable Node version, editor, and line-ending configuration.
+- Reproducible OCI image, Apple Container/Docker deployment commands, hardened Compose defaults, and a production container smoke test.
+- Container deployment runbook and documented environment-variable examples.
 
 ### Changed
 
 - Reworked the README around architecture, current scope, safety, setup, and verification.
 - Replaced maintainer-specific paths, LAN addresses, device identifiers, and firmware hashes with auto-detection or local environment settings.
 - Updated Vite to 8.1.4 and moved build tooling to development dependencies.
+- Serve the built frontend directly in production while keeping Vite middleware limited to development.
+- Default container networking to localhost, Home Assistant execution to `dry_run`, and Hermes integration to API transport.
 
 ### Fixed
 
@@ -27,6 +31,8 @@ All notable changes to this project will be documented in this file. The format 
 - Enabled private vulnerability reporting, secret scanning push protection, and Dependabot security updates on GitHub.
 - Replaced user-controlled and backtracking-prone regular expressions with literal or bounded string matching.
 - Parse provider URLs before matching trusted DeepSeek hostnames and use SHA-256 for semantic cache identifiers.
+- Run the production container as a non-root user with a read-only root filesystem, dropped Linux capabilities, `no-new-privileges`, and a dedicated writable data volume.
+- Rate-limit production SPA fallback requests with standard response headers.
 
 ## [0.1.0] - 2026-07-11
 

@@ -1,0 +1,45 @@
+services:
+  jarvis:
+    build:
+      context: .
+      target: runtime
+    image: ${JARVIS_CONTAINER_IMAGE:-harness-house-jarvis:local}
+    restart: unless-stopped
+    cpus: "${JARVIS_CONTAINER_CPUS:-2.0}"
+    mem_limit: "${JARVIS_CONTAINER_MEMORY:-1g}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: production
+      JARVIS_BIND_HOST: 0.0.0.0
+      PORT: 5173
+      HARNESS_EXECUTION_MODE: ${JARVIS_CONTAINER_EXECUTION_MODE:-dry_run}
+      HERMES_API_TRANSPORT: api
+      JARVIS_SUBAGENT_COMMAND: ""
+      JARVIS_DELIVERY_WECHAT_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${JARVIS_CONTAINER_PORT:-5173}:5173"
+    volumes:
+      - jarvis-data:/app/data
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:5173/api/runtime/status').then((response)=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    stop_grace_period: 15s
+
+volumes:
+  jarvis-data:
