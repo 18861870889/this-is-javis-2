@@ -1,7 +1,9 @@
+import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import {
   createConversationContextStore,
   isComfortFollowUpInput,
+  isPartialExecutionConfirmationInput,
   isReferentialControlInput,
   isRoomScopedFollowUpInput,
 } from "./conversationContext.js";
@@ -167,5 +169,17 @@ describe("conversation context", () => {
     expect(isComfortFollowUpInput("还是有点暗")).toBe(true);
     expect(isReferentialControlInput("不够亮啊")).toBe(true);
     expect(isRoomScopedFollowUpInput("关灯吧")).toBe(true);
+  });
+
+  it("rejects malicious repeated partial-confirmation input without excessive backtracking", () => {
+    const maliciousInput = `${"只执行".repeat(1_000)}无效结尾`;
+    const startedAt = performance.now();
+
+    const result = isPartialExecutionConfirmationInput(maliciousInput);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(result).toBe(false);
+    expect(isPartialExecutionConfirmationInput("跳过离线设备，执行其他可执行设备")).toBe(true);
+    expect(elapsedMs).toBeLessThan(200);
   });
 });

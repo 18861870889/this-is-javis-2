@@ -236,7 +236,7 @@ function spokenPrompts() {
 function defaultExpectText(sessionScenario, filename) {
   if (sessionScenario === "pc") return "电脑工作区";
   if (sessionScenario === "ha-control") return "打开次卧吸顶灯";
-  if (sessionScenario === "agent") return "/总结|今天/";
+  if (sessionScenario === "agent") return "总结";
   if (sessionScenario === "full") return "";
   return "次卧吸顶灯";
 }
