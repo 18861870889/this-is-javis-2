@@ -55,22 +55,39 @@
     "container:stop": "node scripts/jarvis-container.mjs stop",
     "container:status": "node scripts/jarvis-container.mjs status",
     "container:smoke": "node scripts/jarvis-container.mjs smoke",
+    "container:live-check": "node scripts/jarvis-container.mjs live-check",
+    "hermes:api:prepare": "node scripts/jarvis-hermes-api.mjs prepare",
+    "hermes:api:start": "node scripts/jarvis-hermes-api.mjs ensure-service",
+    "hermes:api:stop": "node scripts/jarvis-hermes-api.mjs disable-service",
+    "hermes:api:status": "node scripts/jarvis-hermes-api.mjs status",
+    "xiaozhi:host:prepare": "node scripts/jarvis-xiaozhi-host.mjs prepare",
+    "xiaozhi:host:start": "node scripts/jarvis-xiaozhi-host.mjs start",
+    "xiaozhi:host:stop": "node scripts/jarvis-xiaozhi-host.mjs stop",
+    "xiaozhi:host:status": "node scripts/jarvis-xiaozhi-host.mjs status",
     "container:docker:build": "docker compose build",
     "container:docker:start": "docker compose up --detach --build",
     "container:docker:stop": "docker compose down"
   },
   "dependencies": {
+    "@modelcontextprotocol/server-filesystem": "2026.7.10",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "lucide-react": "^0.468.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "three": "^0.181.2"
+    "three": "^0.181.2",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.1.1",
     "playwright-core": "^1.60.0",
     "vite": "^8.1.4",
     "vitest": "^4.1.8"
+  },
+  "overrides": {
+    "body-parser": "2.3.0",
+    "brace-expansion": "5.0.8",
+    "glob": "13.0.6",
+    "minimatch": "10.2.6"
   }
 }

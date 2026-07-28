@@ -6,7 +6,8 @@ The defaults are intentionally conservative:
 
 - publish only on `127.0.0.1`;
 - keep Home Assistant actions in `dry_run`;
-- load credentials from an ignored local `.env`, never from the image;
+- read credentials from an ignored local `.env`, copy only required values into
+  ignored `0600` secret files, and mount their directories read-only;
 - run Hermes through its API transport;
 - run as a non-root user with a read-only root filesystem and dropped capabilities.
 - limit production frontend fallback traffic per client without throttling Jarvis API routes.
@@ -51,11 +52,14 @@ Keep these safety defaults during initial acceptance:
 ```dotenv
 JARVIS_CONTAINER_ENGINE=auto
 JARVIS_CONTAINER_BIND_HOST=127.0.0.1
-JARVIS_CONTAINER_PORT=5173
+JARVIS_CONTAINER_PORT=5183
 JARVIS_CONTAINER_EXECUTION_MODE=dry_run
 JARVIS_CONTAINER_CPUS=2.0
 JARVIS_CONTAINER_MEMORY=1g
 HERMES_API_TRANSPORT=api
+JARVIS_HOME_INTENT_PLANNER=hermes
+JARVIS_HOME_INTENT_REQUIRED=true
+JARVIS_PC_TASK_MODE=hermes
 ```
 
 Add secrets only to `.env`:
@@ -63,10 +67,9 @@ Add secrets only to `.env`:
 ```dotenv
 HA_BASE_URL=http://homeassistant.local:8123
 HA_TOKEN=replace-with-a-least-privilege-token
-HERMES_API_BASE_URL=http://host-address-reachable-from-the-container:19998
 ```
 
-Never put tokens in `Dockerfile`, `compose.yaml`, shell history, source-controlled examples, or image build arguments. Confirm `.env` remains ignored before proceeding:
+Never put tokens in `Dockerfile`, `compose.yaml`, shell history, source-controlled examples, image build arguments, or container environment values. The wrapper does not inject the whole `.env`; it passes an explicit non-secret allowlist and exposes HA/Hermes/Xiaozhi credentials through `_FILE` paths. Confirm `.env` remains ignored before proceeding:
 
 ```bash
 git check-ignore .env
@@ -80,6 +83,8 @@ Run the preflight, image build, and disposable smoke test:
 npm run container:check
 npm run container:build
 npm run container:smoke
+npm run xiaozhi:host:prepare
+npm run xiaozhi:host:start
 ```
 
 The smoke test must prove all of the following before a persistent service starts:
@@ -94,10 +99,11 @@ Start and inspect the persistent service:
 ```bash
 npm run container:start
 npm run container:status
-curl --fail http://127.0.0.1:5173/api/runtime/status
+npm run container:live-check
+curl --fail http://127.0.0.1:5183/api/runtime/status
 ```
 
-Open `http://127.0.0.1:5173` only after the status check succeeds. Stop the service with:
+Open `http://127.0.0.1:5183` only after the status check succeeds. `container:start` proves the server is up; `container:live-check` is stricter and fails unless both Hermes and Home Assistant are reachable from the running container. Stop the service with:
 
 ```bash
 npm run container:stop
@@ -105,16 +111,84 @@ npm run container:stop
 
 ## Hermes API Transport
 
-The container does not mount a host Hermes installation or execute its local CLI. Non-home tasks therefore use:
+The container does not mount the host Hermes installation. The wrapper reuses Hermes' native OpenAI-compatible API instead of creating a proxy or a second agent:
 
 ```dotenv
 HERMES_API_TRANSPORT=api
-HERMES_API_BASE_URL=http://host-address-reachable-from-the-container:19998
+JARVIS_HERMES_API_HOST=127.0.0.1
+JARVIS_HERMES_API_PORT=8642
+JARVIS_APPLE_HERMES_HOST=203.0.113.113
 ```
 
-Do not use `127.0.0.1` for a Hermes process running on the host: from inside the container it points back to Jarvis's own Linux environment. Use a host address that the selected runtime can reach, then restrict that Hermes listener with the host firewall. Keep `JARVIS_SUBAGENT_COMMAND` unset unless a separately reviewed remote execution design is introduced.
+Hermes listens only on host loopback. Apple Container reaches it through Apple's
+localhost forwarding rule:
+
+```bash
+sudo container system dns create host.container.internal --localhost 203.0.113.113
+container system dns list
+```
+
+The packet-filter rule forwards the reserved local address `203.0.113.113`.
+`container:start` uses that address directly because some VPNs fake-resolve
+`host.container.internal` into `198.18.0.0/15`. The rule can be removed by a
+macOS or Apple Container restart, so the wrapper verifies it and runs an
+authenticated disposable-container request before Jarvis starts. Do not replace
+this with a LAN or `0.0.0.0` Hermes listener.
+
+`npm run hermes:api:start` generates a 32-byte key, stores it under
+`data/jarvis-hermes-api.local/api.key`, updates Hermes' ignored `0600`
+environment, and restarts the installed Hermes gateway. Protected API routes
+return `401` without that key. Jarvis mounts the secret directory read-only and
+uses `HERMES_API_KEY_FILE`; `container inspect` therefore contains only a file
+path, not the key.
+Disable the API platform without stopping Hermes' direct WeChat gateway with:
+
+```bash
+npm run hermes:api:stop
+```
+
+The wrapper sets `JARVIS_PC_TASK_MODE=hermes`, so PC requests use Hermes tools on the host. It also sets `JARVIS_HOME_INTENT_REQUIRED=true`: a real control command with neither a verified semantic-cache hit nor a valid Hermes HomeIntent fails closed before HCM execution. HCM remains the only route to Home Assistant.
 
 Verify a harmless non-home request before relying on Hermes for longer tasks. A timeout or connection failure should be treated as an API/networking problem, not as permission to expose Hermes publicly.
+
+## Xiaozhi Host And Delivery Router
+
+The local Xiaozhi process remains on the Mac so StackChan can reach its existing
+WebSocket/OTA ports while Jarvis stays containerized:
+
+```bash
+npm run xiaozhi:host:prepare
+npm run xiaozhi:host:start
+npm run xiaozhi:host:status
+```
+
+The manager fails closed unless Xiaozhi uses `JarvisLLM`, `nointent`,
+`server.auth.enabled=true`, and at least one allowed device. Device WebSocket
+`8000` and OTA `8003` may listen on the LAN for the allowlisted StackChan.
+Proactive TTS uses a separate bearer-authenticated endpoint on
+`127.0.0.1:8004`; Apple Container reaches it through `203.0.113.113:8004`.
+
+Synchronous voice replies return through Xiaozhi's normal LLM/TTS flow.
+Background task completion uses Delivery Router:
+
+```text
+accepted -> dispatched -> delivered_inferred
+```
+
+`delivered_inferred` means Xiaozhi sent `tts.stop` and the same automatic-mode
+connection later sent `listen:start`. It is deliberately not described as a
+firmware-correlated ACK. Stop the host process with
+`npm run xiaozhi:host:stop`.
+
+Transient `offline` and `busy` responses are retried in memory after
+`1s,3s,10s` by default, using the same idempotent delivery ID and never beyond
+the message TTL. Configure the bounded schedule with
+`JARVIS_XIAOZHI_DELIVERY_RETRY_MS`.
+
+Container mode intentionally keeps Delivery Router WeChat disabled because the
+container does not mount Hermes' Python installation or WeChat credentials.
+Direct WeChat-to-Hermes conversations continue through the existing host
+gateway and do not enter Delivery Router.
 
 ## Home Assistant Acceptance
 
@@ -127,11 +201,13 @@ Containerization does not change the HCM boundary. Jarvis Brain produces home-co
 5. Set `JARVIS_CONTAINER_EXECUTION_MODE=real` only for an explicitly accepted deployment, then restart the container.
 6. Return immediately to `dry_run` if execution or post-action verification differs from the spoken request.
 
-Home Assistant must be reachable from inside the container. Prefer a stable private LAN address or private DNS name; do not publish Home Assistant or Jarvis directly to the public internet.
+Home Assistant must be reachable from inside the container. Prefer a stable private LAN IP or DNS record that resolves inside the VM; mDNS-only `.local` names are not guaranteed to resolve there. Do not publish Home Assistant or Jarvis directly to the public internet.
 
 ## StackChan And Xiaozhi Networking
 
-The default `127.0.0.1` publication intentionally allows only local clients. A StackChan or Xiaozhi service on another device cannot reach that address.
+The default Jarvis publication on `127.0.0.1:5183` intentionally allows only the
+local Xiaozhi process. StackChan connects to Xiaozhi on the Mac's private LAN
+address; it does not connect directly to Jarvis or Hermes.
 
 For physical-device testing, use an authenticated private tunnel or a narrowly scoped LAN firewall rule before changing the bind address. Permit only the required trusted source and port, keep camera-related endpoints private, and verify exposed listeners on the host:
 
@@ -143,7 +219,10 @@ On macOS, use `lsof -nP -iTCP -sTCP:LISTEN` when `ss` is unavailable. Do not exp
 
 ## Data And Updates
 
-Runtime data is stored outside the read-only image at `/app/data` through a dedicated volume. Back up that volume before destructive changes. Do not commit its contents because it can contain household topology, audits, learned behavior, or conversation context.
+Runtime data is stored outside the read-only image at `/app/data` through
+`data/container-runtime.local` on Apple Container or a dedicated Docker volume.
+Secret-manager directories are not part of that data mount. Back up runtime data
+before destructive changes and never commit it.
 
 To update safely:
 
@@ -174,28 +253,38 @@ Start Docker Desktop or the Docker daemon, then rerun `docker version` and `npm 
 
 ### Jarvis is healthy but Hermes is unreachable
 
-Confirm `HERMES_API_TRANSPORT=api`, replace a host-only `127.0.0.1` Hermes URL, and test the configured address from the container network. Keep the listener private.
+Confirm `HERMES_API_TRANSPORT=api`, keep Hermes bound to `127.0.0.1`, and
+recreate Apple's localhost forwarding rule if `container system dns list` does
+not contain `host.container.internal`:
+
+```bash
+sudo container system dns create host.container.internal --localhost 203.0.113.113
+```
+
+Then rerun `npm run container:start`; its disposable-container probe verifies the
+authenticated path before the persistent service starts.
 
 ### Home Assistant discovery or execution fails
 
 Check the private HA address, least-privilege token, HCM audit, allowed room/entity scope, and execution mode. Do not solve connectivity by opening HA to the internet.
 
-### Port 5173 is already in use
+### Port 5183 is already in use
 
-Choose another localhost port in `.env`, for example:
+Stop the old host Jarvis service before switching Xiaozhi to the container. If another local service intentionally owns the port, select a different one and update Xiaozhi's Jarvis LLM base URL at the same time:
 
 ```dotenv
-JARVIS_CONTAINER_PORT=5183
+JARVIS_CONTAINER_PORT=5184
 ```
 
-Then restart and use `http://127.0.0.1:5183`.
+Then restart and use `http://127.0.0.1:5184`.
 
 ## Security Checklist
 
 - [ ] The published address is `127.0.0.1` or protected by a reviewed private-access policy.
 - [ ] `JARVIS_CONTAINER_EXECUTION_MODE` remains `dry_run` until real-device acceptance is complete.
-- [ ] `.env` is ignored and no secret is present in image history or tracked files.
+- [ ] `.env` is ignored; `container inspect` has only `_FILE` secret paths and no inline token/key values.
 - [ ] Hermes uses API transport over a private, firewall-restricted path.
+- [ ] Xiaozhi auth and its device allowlist are enabled; delivery API `8004` is loopback-only and bearer-authenticated.
 - [ ] The runtime is non-root, read-only, capability-dropped, and uses only the dedicated data volume.
 - [ ] Home Assistant uses a least-privilege token and sensitive device classes remain blocked.
 - [ ] Host listener inspection shows no unexpected public HTTP, WebSocket, HA, Hermes, or camera port.

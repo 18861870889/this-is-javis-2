@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildDeliveryForPcResult,
   createDeliveryMessage,
@@ -17,7 +17,7 @@ describe("deliveryRouter", () => {
     expect(shouldUseDeliveryRouter({ ingress: "hermes_wechat" })).toBe(false);
   });
 
-  it("delivers short home results by voice and audit without calling WeChat", async () => {
+  it("returns synchronous voice results inline without claiming playback acknowledgement", async () => {
     const audits = [];
     let wechatCalls = 0;
     const router = createDeliveryRouter({
@@ -34,28 +34,186 @@ describe("deliveryRouter", () => {
       voiceSummary: "次卧吸顶灯开着。",
       channels: ["voice"],
       source: "voice_bridge",
+      voiceMode: "inline",
     }, fixedNow));
 
-    expect(delivery.status).toBe("delivered");
+    expect(delivery.status).toBe("dispatched");
     expect(delivery.channelResults).toEqual([
-      expect.objectContaining({ channel: "voice", status: "delivered" }),
-    ]);
-    expect(router.getVoiceQueue()).toEqual([
       expect.objectContaining({
-        targetDeviceId: "stackchan-second",
-        roomId: "second",
-        text: "次卧吸顶灯开着。",
-        status: "delivered",
+        channel: "voice",
+        status: "dispatched",
+        reason: "returned_to_ingress",
       }),
     ]);
+    expect(router.getVoiceQueue()).toEqual([]);
     expect(audits).toEqual([
       expect.objectContaining({
         source: "voice_bridge",
-        status: "delivered",
+        status: "dispatched",
         hasWechatBody: false,
       }),
     ]);
     expect(wechatCalls).toBe(0);
+  });
+
+  it("keeps asynchronous voice results pending until dispatch and playback acknowledgement", async () => {
+    const router = createDeliveryRouter({ now: fixedNow });
+    const delivery = await router.route(createDeliveryMessage({
+      origin: { ingress: "xiaozhi_llm", sourceDeviceId: "stackchan-second", roomId: "second" },
+      voiceSummary: "后台任务已经完成。",
+      channels: ["voice"],
+      source: "task_runtime",
+    }, fixedNow));
+
+    expect(delivery.status).toBe("pending");
+    expect(router.getVoiceQueue()).toEqual([
+      expect.objectContaining({ status: "pending", text: "后台任务已经完成。" }),
+    ]);
+
+    const [dispatched] = router.drainVoiceQueue({ targetDeviceId: "stackchan-second" });
+    expect(dispatched).toMatchObject({ status: "dispatched" });
+    expect(router.acknowledgeVoiceDelivery(dispatched.id)).toMatchObject({ status: "delivered" });
+    expect(router.getVoiceQueue()).toEqual([
+      expect.objectContaining({ status: "delivered" }),
+    ]);
+  });
+
+  it("pushes asynchronous results to Xiaozhi and records inferred playback completion", async () => {
+    const audits = [];
+    let finishDelivery;
+    const completion = new Promise((resolve) => {
+      finishDelivery = resolve;
+    });
+    const sent = [];
+    const router = createDeliveryRouter({
+      now: fixedNow,
+      writeAudit: (entry) => audits.push(entry),
+      voiceSender: async (message) => {
+        sent.push(message);
+        return {
+          status: "accepted",
+          completion,
+        };
+      },
+    });
+
+    const delivery = await router.route(createDeliveryMessage({
+      taskId: "task-async-1",
+      origin: { ingress: "xiaozhi_llm", sourceDeviceId: "stackchan-second", roomId: "second" },
+      voiceSummary: "后台任务已经完成。",
+      channels: ["voice"],
+      source: "task_runtime",
+    }, fixedNow));
+
+    expect(delivery.status).toBe("accepted");
+    expect(sent).toEqual([
+      expect.objectContaining({
+        deliveryId: expect.stringMatching(/^voice-delivery-/),
+        targetDeviceId: "stackchan-second",
+        text: "后台任务已经完成。",
+      }),
+    ]);
+    expect(router.getVoiceQueue()[0]).toMatchObject({ status: "accepted" });
+
+    finishDelivery({
+      status: "delivered_inferred",
+      updatedAt: "2026-07-07T10:00:02.000Z",
+    });
+    await completion;
+    await Promise.resolve();
+
+    expect(router.getVoiceQueue()[0]).toMatchObject({
+      status: "delivered_inferred",
+      updatedAt: "2026-07-07T10:00:02.000Z",
+    });
+    expect(audits).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: "delivered_inferred",
+        channelResults: [
+          expect.objectContaining({ status: "delivered_inferred" }),
+        ],
+      }),
+    ]));
+  });
+
+  it("surfaces Xiaozhi offline state without claiming successful speech", async () => {
+    const router = createDeliveryRouter({
+      now: fixedNow,
+      voiceSender: async () => ({ status: "offline", reason: "device_offline" }),
+    });
+    const delivery = await router.route(createDeliveryMessage({
+      origin: { ingress: "xiaozhi_llm", sourceDeviceId: "stackchan-second" },
+      voiceSummary: "任务完成了。",
+      channels: ["voice"],
+      source: "task_runtime",
+    }, fixedNow));
+
+    expect(delivery.status).toBe("offline");
+    expect(delivery.channelResults[0]).toMatchObject({
+      channel: "voice",
+      status: "offline",
+      reason: "device_offline",
+    });
+    expect(router.getVoiceQueue()[0]).toMatchObject({ status: "offline" });
+  });
+
+  it("retries a transient offline delivery without changing the delivery id", async () => {
+    const scheduled = [];
+    const sent = [];
+    const router = createDeliveryRouter({
+      now: fixedNow,
+      voiceRetryDelaysMs: [1000],
+      schedule: (callback, delayMs) => {
+        scheduled.push({ callback, delayMs });
+        return { unref() {} };
+      },
+      voiceSender: async (message) => {
+        sent.push(message);
+        return sent.length === 1
+          ? { status: "offline", reason: "device_offline" }
+          : { status: "accepted" };
+      },
+    });
+    const delivery = await router.route(createDeliveryMessage({
+      origin: { ingress: "xiaozhi_llm", sourceDeviceId: "stackchan-second" },
+      voiceSummary: "任务完成了。",
+      channels: ["voice"],
+      source: "task_runtime",
+    }, fixedNow));
+
+    expect(delivery.status).toBe("offline");
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0].delayMs).toBe(1000);
+    scheduled[0].callback();
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+
+    expect(sent[1].deliveryId).toBe(sent[0].deliveryId);
+    expect(router.getVoiceQueue()[0]).toMatchObject({
+      status: "accepted",
+      attemptCount: 2,
+      retryIndex: 1,
+    });
+  });
+
+  it("does not let successful WeChat delivery hide failed voice delivery", async () => {
+    const router = createDeliveryRouter({
+      now: fixedNow,
+      voiceSender: async () => ({ status: "offline", reason: "device_offline" }),
+      wechatSender: async () => ({ status: "delivered" }),
+    });
+    const delivery = await router.route(createDeliveryMessage({
+      origin: { ingress: "xiaozhi_llm", sourceDeviceId: "stackchan-second" },
+      voiceSummary: "语音摘要。",
+      wechatBody: "完整结果。",
+      channels: ["voice", "wechat"],
+      source: "task_runtime",
+    }, fixedNow));
+
+    expect(delivery.status).toBe("partial_failed");
+    expect(delivery.channelResults).toEqual(expect.arrayContaining([
+      expect.objectContaining({ channel: "voice", status: "offline" }),
+      expect.objectContaining({ channel: "wechat", status: "delivered" }),
+    ]));
   });
 
   it("skips direct Hermes WeChat chat origins", async () => {
@@ -106,9 +264,9 @@ describe("deliveryRouter", () => {
 
     const delivery = await router.route(message);
 
-    expect(delivery.status).toBe("delivered");
+    expect(delivery.status).toBe("dispatched");
     expect(delivery.channelResults).toEqual(expect.arrayContaining([
-      expect.objectContaining({ channel: "voice", status: "delivered" }),
+      expect.objectContaining({ channel: "voice", status: "dispatched" }),
       expect.objectContaining({ channel: "wechat", status: "delivered" }),
     ]));
     expect(sent).toEqual([

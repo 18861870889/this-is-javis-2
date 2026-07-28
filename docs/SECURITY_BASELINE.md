@@ -87,6 +87,11 @@ The initial `computer_create_markdown_file` tool can only write `.md` files insi
   - Home Assistant snapshots containing tokens, passwords, URLs, or device secrets
   - local audit logs that may contain private commands
 - Audit and provider snapshots must redact `authorization`, `token`, `password`, `api_key`, and similar secret fields.
+- Shell transcripts, agent sessions, copied terminal output, screenshots, and support bundles can also retain secrets even when Git is clean. Never ask an agent to print an entire `.env`; use key-name-only or masked checks.
+- Treat a credential shown in any chat/session log as compromised: remove the stale local value, rotate it at the provider, and review downstream access history.
+- Hermes' native API exposes reviewed file/search tools. Bind it to host loopback,
+  reach it only through the Apple/Docker local forwarding path, require a strong
+  bearer key, and verify protected routes return `401` without authorization.
 
 ## 5. Camera And Sensitive Devices
 
@@ -131,7 +136,7 @@ lsof -nP -iTCP -sTCP:LISTEN
 Focused checks:
 
 ```bash
-lsof -nP -iTCP:5183 -iTCP:8000 -iTCP:8003 -iTCP:24678 -sTCP:LISTEN
+lsof -nP -iTCP:5183 -iTCP:8000 -iTCP:8003 -iTCP:8004 -iTCP:8642 -iTCP:24678 -sTCP:LISTEN
 curl -fsS http://127.0.0.1:5183/api/runtime/status
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:5183/api/adapters/home-assistant/actions
 ```
@@ -141,6 +146,11 @@ Required checks:
 - No unexpected listener is present.
 - Jarvis is bound to `127.0.0.1` unless LAN access is intentionally required.
 - No current Jarvis `node` process is listening on `*:24678` or another public HMR/debug port.
+- Hermes `8642`, proactive delivery `8004`, and Jarvis `5183` listen on
+  `127.0.0.1` only; only authenticated/allowlisted Xiaozhi device ports
+  `8000/8003` may listen on the private LAN.
+- macOS Application Firewall is enabled, Xiaozhi's reviewed Python executable is
+  allowed, and stealth mode is enabled.
 - If Jarvis is bound to `0.0.0.0`, firewall or tunnel access is already restricted to trusted sources.
 - Home Assistant is not exposed through Jarvis routes that bypass HCM.
 - `/api/adapters/home-assistant/actions` remains disabled.
@@ -149,6 +159,13 @@ Required checks:
 - The first physical test uses room and text guards.
 - TTS output cannot feed back into STT as a new command.
 - Camera and other sensitive device actions remain blocked by policy tests.
+- `/api/runtime/readiness` reports Hermes and Home Assistant reachability without returning URLs, tokens, or upstream response bodies.
+- Delivery status does not claim speech completion on enqueue: inline Xiaozhi
+  text is `dispatched`; asynchronous work records `accepted`, then
+  `dispatched`, and only the same connection's post-dispatch `listen:start`
+  becomes `delivered_inferred`.
+- `container inspect` must show empty inline HA/Hermes/delivery key variables and
+  only `_FILE` paths into read-only secret directories.
 
 ## 7. Incident Response
 

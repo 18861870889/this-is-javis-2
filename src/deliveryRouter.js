@@ -16,11 +16,18 @@ const ROUTED_INGRESSES = new Set([
 const DIRECT_CHAT_INGRESSES = new Set(["wechat", "weixin", "hermes_wechat", "direct_wechat"]);
 const DEFAULT_PRIORITY = "normal";
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
+const RETRYABLE_VOICE_STATUSES = new Set(["busy", "offline"]);
+const DEFAULT_VOICE_RETRY_DELAYS_MS = [1000, 3000, 10_000];
 
 export function createDeliveryRouter({
   now = () => new Date(),
   writeAudit = () => {},
   wechatSender = null,
+  voiceSender = null,
+  schedule = (callback, delayMs) => setTimeout(callback, delayMs),
+  voiceRetryDelaysMs = parseRetryDelays(
+    process.env.JARVIS_XIAOZHI_DELIVERY_RETRY_MS,
+  ),
 } = {}) {
   const voiceQueue = [];
 
@@ -44,7 +51,15 @@ export function createDeliveryRouter({
     }
 
     if (message.channels.includes("voice")) {
-      const voiceResult = enqueueVoiceMessage(voiceQueue, message, now);
+      const voiceResult = message.voiceMode === "inline"
+        ? buildInlineVoiceResult(message)
+        : await enqueueAndDispatchVoiceMessage(voiceQueue, message, {
+          now,
+          voiceSender,
+          writeAudit,
+          schedule,
+          voiceRetryDelaysMs,
+        });
       channelResults.push(voiceResult);
     }
 
@@ -76,16 +91,30 @@ export function createDeliveryRouter({
       }
       if (filter.targetDeviceId && item.targetDeviceId && item.targetDeviceId !== filter.targetDeviceId) continue;
       if (filter.roomId && item.roomId && item.roomId !== filter.roomId) continue;
-      item.status = "delivered";
+      item.status = "dispatched";
       item.updatedAt = now().toISOString();
       drained.push({ ...item });
     }
     return drained;
   }
 
+  function acknowledgeVoiceDelivery(queueId, {
+    delivered = true,
+    reason = "",
+  } = {}) {
+    const item = voiceQueue.find((entry) => entry.id === queueId);
+    if (!item) return null;
+    if (!["pending", "accepted", "dispatched"].includes(item.status)) return { ...item };
+    item.status = delivered ? "delivered" : "failed";
+    item.reason = normalizeText(reason);
+    item.updatedAt = now().toISOString();
+    return { ...item };
+  }
+
   return {
     route,
     drainVoiceQueue,
+    acknowledgeVoiceDelivery,
     getVoiceQueue: () => voiceQueue.map((item) => ({ ...item })),
   };
 }
@@ -109,6 +138,7 @@ export function createDeliveryMessage({
   priority = DEFAULT_PRIORITY,
   expiresAt = "",
   source = "",
+  voiceMode = "queue",
 } = {}, now = () => new Date()) {
   return normalizeDeliveryMessage({
     taskId,
@@ -120,6 +150,7 @@ export function createDeliveryMessage({
     priority,
     expiresAt,
     source,
+    voiceMode,
   }, now);
 }
 
@@ -192,6 +223,7 @@ export function buildDeliveryForVoiceBridgeResult(result, {
     channels: ["voice"],
     priority: "normal",
     source,
+    voiceMode: "inline",
   }, now);
 }
 
@@ -213,6 +245,7 @@ export function buildDeliveryForPcResult(result, {
     channels: ["voice", "wechat"],
     priority: "normal",
     source,
+    voiceMode: "inline",
   }, now);
 }
 
@@ -247,6 +280,7 @@ function normalizeDeliveryMessage(input = {}, now) {
     priority: normalizeText(input.priority) || DEFAULT_PRIORITY,
     expiresAt,
     source: normalizeText(input.source),
+    voiceMode: normalizeVoiceMode(input.voiceMode),
     createdAt,
     status: "pending",
   };
@@ -283,16 +317,207 @@ function enqueueVoiceMessage(queue, message, now) {
     text: message.voiceSummary,
     priority: message.priority,
     expiresAt: message.expiresAt,
-    status: "delivered",
+    status: message.voiceSummary ? "pending" : "skipped",
+    reason: message.voiceSummary ? "" : "empty_voice_summary",
     createdAt: message.createdAt,
     updatedAt: now().toISOString(),
+    attemptCount: 0,
+    retryIndex: 0,
+    nextRetryAt: "",
   };
   queue.push(entry);
   return {
     channel: "voice",
-    status: message.voiceSummary ? "delivered" : "skipped",
+    status: message.voiceSummary ? "pending" : "skipped",
     reason: message.voiceSummary ? "" : "empty_voice_summary",
     queueId: entry.id,
+    text: message.voiceSummary,
+  };
+}
+
+async function enqueueAndDispatchVoiceMessage(queue, message, {
+  now,
+  voiceSender,
+  writeAudit,
+  schedule,
+  voiceRetryDelaysMs,
+}) {
+  const initial = enqueueVoiceMessage(queue, message, now);
+  if (initial.status !== "pending" || typeof voiceSender !== "function") return initial;
+  const item = queue.find((entry) => entry.id === initial.queueId);
+  if (!item) return initial;
+
+  return dispatchQueuedVoiceAttempt({
+    item,
+    message,
+    now,
+    voiceSender,
+    writeAudit,
+    schedule,
+    voiceRetryDelaysMs,
+  });
+}
+
+async function dispatchQueuedVoiceAttempt({
+  item,
+  message,
+  now,
+  voiceSender,
+  writeAudit,
+  schedule,
+  voiceRetryDelaysMs,
+}) {
+  let remote;
+  item.attemptCount += 1;
+  item.nextRetryAt = "";
+  try {
+    remote = await voiceSender({
+      deliveryId: item.id,
+      targetDeviceId: item.targetDeviceId,
+      text: item.text,
+      priority: item.priority,
+      expiresAt: item.expiresAt,
+    });
+  } catch (error) {
+    remote = {
+      status: "failed",
+      reason: normalizeText(error?.message || "xiaozhi_delivery_failed").slice(0, 160),
+    };
+  }
+  applyRemoteVoiceStatus(item, remote, now);
+  observeRemoteVoiceCompletion({
+    item,
+    message,
+    completion: remote?.completion,
+    now,
+    writeAudit,
+  });
+  scheduleRemoteVoiceRetry({
+    item,
+    message,
+    now,
+    voiceSender,
+    writeAudit,
+    schedule,
+    voiceRetryDelaysMs,
+  });
+  return buildQueuedVoiceResult(item, remote);
+}
+
+function scheduleRemoteVoiceRetry({
+  item,
+  message,
+  now,
+  voiceSender,
+  writeAudit,
+  schedule,
+  voiceRetryDelaysMs,
+}) {
+  if (!RETRYABLE_VOICE_STATUSES.has(item.status)) return;
+  const delayMs = voiceRetryDelaysMs[item.retryIndex];
+  if (!Number.isFinite(delayMs) || delayMs <= 0) return;
+  const retryAtMs = now().getTime() + delayMs;
+  if (retryAtMs >= new Date(item.expiresAt).getTime()) return;
+  item.retryIndex += 1;
+  item.nextRetryAt = new Date(retryAtMs).toISOString();
+
+  const handle = schedule(() => {
+    if (!RETRYABLE_VOICE_STATUSES.has(item.status)) return;
+    if (new Date(item.expiresAt).getTime() <= now().getTime()) {
+      applyRemoteVoiceStatus(item, {
+        status: "expired",
+        reason: "expired_before_retry",
+      }, now);
+      writeVoiceStatusAudit({ item, message, now, writeAudit });
+      return;
+    }
+    void dispatchQueuedVoiceAttempt({
+      item,
+      message,
+      now,
+      voiceSender,
+      writeAudit,
+      schedule,
+      voiceRetryDelaysMs,
+    }).then(() => {
+      writeVoiceStatusAudit({ item, message, now, writeAudit });
+    });
+  }, delayMs);
+  handle?.unref?.();
+}
+
+function observeRemoteVoiceCompletion({
+  item,
+  message,
+  completion,
+  now,
+  writeAudit,
+}) {
+  if (!completion || typeof completion.then !== "function") return;
+  void Promise.resolve(completion)
+    .then((remote) => {
+      applyRemoteVoiceStatus(item, remote, now);
+      writeVoiceStatusAudit({ item, message, now, writeAudit, remote });
+    })
+    .catch((error) => {
+      applyRemoteVoiceStatus(item, {
+        status: "failed",
+        reason: normalizeText(error?.message || "xiaozhi_delivery_status_failed").slice(0, 160),
+      }, now);
+      writeVoiceStatusAudit({ item, message, now, writeAudit });
+    });
+}
+
+function writeVoiceStatusAudit({
+  item,
+  message,
+  now,
+  writeAudit,
+  remote = {},
+}) {
+  writeAudit(sanitizeAuditRecord({
+    ...message,
+    status: item.status,
+    channelResults: [buildQueuedVoiceResult(item, remote)],
+  }, now));
+}
+
+function applyRemoteVoiceStatus(item, remote, now) {
+  const status = normalizeToken(remote?.status);
+  const supported = new Set([
+    "accepted",
+    "busy",
+    "offline",
+    "expired",
+    "failed",
+    "dispatched",
+    "delivered",
+    "delivered_inferred",
+  ]);
+  item.status = supported.has(status) ? status : "failed";
+  item.reason = normalizeText(
+    remote?.reason || (supported.has(status) ? "" : "invalid_xiaozhi_delivery_status"),
+  ).slice(0, 160);
+  item.updatedAt = normalizeText(remote?.updatedAt) || now().toISOString();
+}
+
+function buildQueuedVoiceResult(item, remote = {}) {
+  return {
+    channel: "voice",
+    status: item.status,
+    reason: item.reason || "",
+    queueId: item.id,
+    text: item.text,
+    remoteStatus: normalizeToken(remote?.status) || item.status,
+  };
+}
+
+function buildInlineVoiceResult(message) {
+  return {
+    channel: "voice",
+    status: message.voiceSummary ? "dispatched" : "skipped",
+    reason: message.voiceSummary ? "returned_to_ingress" : "empty_voice_summary",
+    queueId: "",
     text: message.voiceSummary,
   };
 }
@@ -326,10 +551,33 @@ async function deliverWechatMessage(message, wechatSender) {
 }
 
 function summarizeDeliveryStatus(channelResults) {
-  if (channelResults.some((result) => result.status === "failed")) return "partial_failed";
+  const voice = channelResults.find((result) => result.channel === "voice");
+  const otherFailed = channelResults.some((result) => (
+    result.channel !== "voice"
+    && ["failed", "offline", "busy", "expired"].includes(result.status)
+  ));
+  if (voice) {
+    if (["failed", "offline", "busy", "expired"].includes(voice.status)) {
+      return channelResults.length > 1 ? "partial_failed" : voice.status;
+    }
+    if (otherFailed) return "partial_failed";
+    return voice.status;
+  }
+  if (channelResults.some((result) => result.status === "failed")) {
+    return channelResults.length > 1 ? "partial_failed" : "failed";
+  }
   if (channelResults.some((result) => result.status === "delivered")) return "delivered";
   if (channelResults.some((result) => result.status === "skipped")) return "skipped";
   return "pending";
+}
+
+function parseRetryDelays(value) {
+  const parsed = String(value || "")
+    .split(",")
+    .map((entry) => Number(entry.trim()))
+    .filter((entry) => Number.isFinite(entry) && entry > 0)
+    .slice(0, 8);
+  return parsed.length ? parsed : [...DEFAULT_VOICE_RETRY_DELAYS_MS];
 }
 
 function sanitizeAuditRecord(result, now) {
@@ -340,6 +588,7 @@ function sanitizeAuditRecord(result, now) {
     source: result.source,
     origin: result.origin,
     channels: result.channels,
+    voiceMode: result.voiceMode,
     priority: result.priority,
     status: result.status,
     channelResults: result.channelResults?.map((item) => ({
@@ -482,6 +731,10 @@ function normalizeText(value) {
 
 function normalizeToken(value) {
   return normalizeText(value).toLowerCase();
+}
+
+function normalizeVoiceMode(value) {
+  return normalizeToken(value) === "inline" ? "inline" : "queue";
 }
 
 function parseBoolean(value) {

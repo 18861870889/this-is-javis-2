@@ -198,7 +198,7 @@ function byteLength(data) {
 
 function fileMatches(filename, expected) {
   const path = resolve(pcWorkspaceRoot, filename);
-  return existsSync(path) && readFileSync(path, "utf8") === expected;
+  return existsSync(path) && readFileSync(path, "utf8").trimEnd() === expected;
 }
 
 function deferred() {

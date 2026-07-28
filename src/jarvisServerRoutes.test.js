@@ -117,8 +117,12 @@ describe("Jarvis server voice routes", () => {
         sourceDeviceId: "stackchan-study",
         roomId: "study",
       },
-      status: "delivered",
-      channelResults: [expect.objectContaining({ channel: "voice", status: "delivered" })],
+      status: "dispatched",
+      channelResults: [expect.objectContaining({
+        channel: "voice",
+        status: "dispatched",
+        reason: "returned_to_ingress",
+      })],
     });
   }, 30000);
 
@@ -228,9 +232,9 @@ describe("Jarvis server voice routes", () => {
           filename: "voice-note.md",
           bytes: 10,
           delivery: expect.objectContaining({
-            status: "delivered",
+            status: "dispatched",
             channelResults: expect.arrayContaining([
-              expect.objectContaining({ channel: "voice", status: "delivered" }),
+              expect.objectContaining({ channel: "voice", status: "dispatched" }),
               expect.objectContaining({ channel: "wechat", status: "skipped" }),
             ]),
           }),
@@ -287,6 +291,35 @@ describe("Jarvis server voice routes", () => {
     expect(readFileSync(markdownPath, "utf8")).toBe("helloworld");
     expect(deliveryEntries.some((entry) => entry.source === "voice_bridge")).toBe(true);
     expect(deliveryEntries.some((entry) => entry.source === "pc_markdown_file")).toBe(true);
+  }, 30000);
+
+  it("uses authenticated Xiaozhi request identity before environment fallbacks", async () => {
+    const tempDir = createTempDir();
+    const harness = await startHarness({
+      tempDir,
+      env: {
+        JARVIS_XIAOZHI_DEVICE_ID: "fallback-device",
+        JARVIS_XIAOZHI_ROOM_ID: "fallback-room",
+        JARVIS_STACKCHAN_DEVICE_ROOMS: '{"request-device":"second"}',
+      },
+    });
+
+    await postJson(`${harness.url}/v1/chat/completions`, {
+      model: "jarvis",
+      messages: [{ role: "user", content: "在电脑上新建一个md文件并写入helloworld" }],
+    }, {
+      "X-Device-Id": "request-device",
+      "X-Room-Id": "untrusted-room-fallback",
+      "X-Session-Id": "request-session",
+    });
+    const deliveryEntries = readJsonl(harness.paths.deliveryAuditPath);
+    const pcDelivery = deliveryEntries.find((entry) => entry.source === "pc_markdown_file");
+
+    expect(pcDelivery?.origin).toMatchObject({
+      sourceDeviceId: "request-device",
+      roomId: "second",
+      wakeSessionId: "request-session",
+    });
   }, 30000);
 
   it("keeps Xiaozhi conversation focus for short ASR-corrected light follow-ups", async () => {
@@ -347,6 +380,35 @@ describe("Jarvis server voice routes", () => {
     expect(existsSync(targetPath)).toBe(true);
     expect(readFileSync(targetPath, "utf8")).toBe("helloworld");
     expect(hermes.calls).toHaveLength(0);
+  }, 30000);
+
+  it("delegates PC file work to Hermes when the container task mode is enabled", async () => {
+    const tempDir = createTempDir();
+    const paths = harnessPaths(tempDir);
+    writeFileSync(paths.contextMemoryPath, `${JSON.stringify({
+      recentPcFiles: [{
+        filename: "old.md",
+        path: join(paths.pcWorkspaceRoot, "old.md"),
+        workspaceRoot: paths.pcWorkspaceRoot,
+      }],
+    })}\n`);
+    const hermes = await startMockHermes("已通过 Hermes 在电脑上创建 bridge-check.md。");
+    const harness = await startHarness({
+      tempDir,
+      hermesBaseUrl: hermes.url,
+      env: {
+        JARVIS_PC_TASK_MODE: "hermes",
+      },
+    });
+
+    const reply = await postJson(`${harness.url}/v1/chat/completions`, {
+      model: "jarvis",
+      messages: [{ role: "user", content: "在电脑工作区新建 bridge-check.md 并写入 helloworld" }],
+    });
+
+    expect(reply.choices[0].message.content).toContain("Hermes");
+    expect(hermes.calls).toHaveLength(1);
+    expect(existsSync(join(harness.paths.pcWorkspaceRoot, "bridge-check.md"))).toBe(false);
   }, 30000);
 
   it("answers follow-up questions about the last created PC file from persistent context", async () => {
@@ -438,9 +500,9 @@ process.stdin.on("end", () => {
     expect(deliveryEntries).toContainEqual(expect.objectContaining({
       taskId: completed.taskId,
       voiceSummary: expect.stringContaining("任务完成了"),
-      status: "delivered",
+      status: "pending",
       channelResults: expect.arrayContaining([
-        expect.objectContaining({ channel: "voice", status: "delivered" }),
+        expect.objectContaining({ channel: "voice", status: "pending" }),
       ]),
     }));
     expect(taskEntries.map((entry) => entry.event)).toEqual(expect.arrayContaining(["created", "updated"]));
@@ -532,6 +594,7 @@ process.stdin.on("end", () => {
     });
     expect(hermes.calls).toHaveLength(1);
     expect(JSON.stringify(hermes.calls[0])).toContain("hcm_context");
+    expect(JSON.stringify(hermes.calls[0])).toContain("HOME_INTENT_PLANNER_V1");
     expect(audit.stages).toContainEqual(expect.objectContaining({
       name: "planner_external",
       summary: expect.objectContaining({ source: "hermes_home_intent" }),
@@ -543,6 +606,100 @@ process.stdin.on("end", () => {
       }),
     );
     expect(ha.serviceCalls).toHaveLength(0);
+  }, 30000);
+
+  it("routes novel home language through Hermes Brain and HCM instead of generic chat", async () => {
+    const tempDir = createTempDir();
+    const ha = await startMockHomeAssistant(createBedroomGraph());
+    const hermes = await startMockHermes((body) => {
+      const systemPrompt = body.messages[0].content;
+      if (systemPrompt.includes("统一入口意图分类器")) {
+        return JSON.stringify({
+          type: "home_intent",
+          confidence: 0.97,
+          reason: "用户希望调节当前房间照明",
+        });
+      }
+      return JSON.stringify({
+        intent_type: "device_control",
+        intent: "打开次卧吸顶灯",
+        confidence: 0.96,
+        summary: "打开次卧吸顶灯。",
+        needs_confirmation: false,
+        actions: [{
+          target: "次卧吸顶灯",
+          room_id: "second",
+          capability: "power",
+          value: true,
+          reason: "根据完整 HCM 上下文选中当前房间主照明",
+        }],
+      });
+    });
+    const harness = await startHarness({
+      tempDir,
+      haBaseUrl: ha.url,
+      hermesBaseUrl: hermes.url,
+      env: {
+        JARVIS_BRAIN_INTENT_CLASSIFIER: "hermes",
+        JARVIS_BRAIN_INTENT_REQUIRED: "true",
+        JARVIS_HOME_INTENT_PLANNER: "hermes",
+        JARVIS_HOME_INTENT_REQUIRED: "true",
+      },
+    });
+
+    const result = await postJson(`${harness.url}/v1/utterance`, {
+      deviceId: "stackchan-second",
+      roomId: "second",
+      wakeSessionId: "hermes-unified-intent-1",
+      text: "这屋有点暗，给点光",
+      dryRun: true,
+    });
+    const [classificationCall, planningCall] = hermes.calls;
+    const audit = readJsonl(harness.paths.commandAuditPath)[0];
+
+    expect(result).toMatchObject({
+      route: "hcm_slow_path",
+      status: "needs_clarification",
+    });
+    expect(hermes.calls).toHaveLength(2);
+    expect(classificationCall.messages[0].content).toContain("统一入口意图分类器");
+    expect(classificationCall.messages.at(-1).content).toContain(
+      JSON.stringify("这屋有点暗，给点光"),
+    );
+    expect(classificationCall.messages.at(-1).content).toContain(
+      "[JARVIS_INTERNAL_INTENT_CLASSIFIER]",
+    );
+    expect(JSON.stringify(planningCall)).toContain("hcm_context");
+    expect(JSON.stringify(planningCall)).toContain("HOME_INTENT_PLANNER_V1");
+    expect(audit.stages).toContainEqual(expect.objectContaining({
+      name: "planner_external",
+      summary: expect.objectContaining({ source: "hermes_home_intent" }),
+    }));
+    expect(ha.serviceCalls).toHaveLength(0);
+  }, 30000);
+
+  it("fails closed when the container requires Hermes HomeIntent and planning is unavailable", async () => {
+    const tempDir = createTempDir();
+    const ha = await startMockHomeAssistant(createBedroomGraph());
+    const hermes = await startMockHermes("not valid planner json");
+    const harness = await startHarness({
+      tempDir,
+      haBaseUrl: ha.url,
+      hermesBaseUrl: hermes.url,
+      env: {
+        JARVIS_HOME_INTENT_PLANNER: "hermes",
+        JARVIS_HOME_INTENT_REQUIRED: "true",
+      },
+    });
+
+    const reply = await postJson(`${harness.url}/v1/chat/completions`, {
+      model: "jarvis",
+      messages: [{ role: "user", content: "打开次卧吸顶灯" }],
+    });
+
+    expect(reply.choices[0].message.content).toContain("为了安全我没有执行");
+    expect(ha.serviceCalls).toHaveLength(0);
+    expect(existsSync(harness.paths.commandAuditPath)).toBe(false);
   }, 30000);
 
   it("records successful Hermes HomeIntent plans and reuses the semantic planning cache", async () => {
@@ -1031,6 +1188,23 @@ process.stdin.on("end", () => {
     expect(existsSync(harness.paths.commandAuditPath)).toBe(false);
   }, 30000);
 
+  it("returns a speakable failure instead of claiming state or control when configured HA is unreachable", async () => {
+    const tempDir = createTempDir();
+    const unavailablePort = await getFreePort();
+    const harness = await startHarness({
+      tempDir,
+      haBaseUrl: `http://127.0.0.1:${unavailablePort}`,
+    });
+
+    const reply = await postJson(`${harness.url}/v1/chat/completions`, {
+      model: "jarvis",
+      messages: [{ role: "user", content: "次卧吸顶灯开着吗" }],
+    });
+
+    expect(reply.choices[0].message.content).toContain("Home Assistant 现在连接不上");
+    expect(reply.choices[0].message.content).toContain("没有读取或控制");
+  }, 30000);
+
   it("returns a speakable timeout fallback when Hermes is too slow", async () => {
     const tempDir = createTempDir();
     const hermes = await startMockHermes("迟到的回答", { delayMs: 200 });
@@ -1067,6 +1241,11 @@ process.stdin.on("end", () => {
       role: "user",
       content: "帮我总结今天要做什么",
     });
+    expect(readJsonl(harness.paths.deliveryAuditPath)).toContainEqual(expect.objectContaining({
+      source: "hermes_agent",
+      status: "dispatched",
+      voiceMode: "inline",
+    }));
     expect(existsSync(harness.paths.commandAuditPath)).toBe(false);
   }, 30000);
 
@@ -1273,6 +1452,9 @@ async function startHarness({ tempDir, haBaseUrl = "", hermesBaseUrl = "", herme
       HERMES_API_KEY: "",
       HERMES_API_TRANSPORT: "api",
       HERMES_API_TIMEOUT_MS: String(hermesTimeoutMs),
+      JARVIS_BRAIN_INTENT_CLASSIFIER: "",
+      JARVIS_BRAIN_INTENT_REQUIRED: "false",
+      JARVIS_BRAIN_INTENT_TIMEOUT_MS: "20000",
       HERMES_CLI_PYTHON: "",
       JARVIS_SUBAGENT_COMMAND: "",
       JARVIS_SUBAGENT_ARGS: "",
@@ -1720,10 +1902,10 @@ function readWsFrame(buffer) {
   return { text: payload.toString("utf8"), remaining: buffer.subarray(offset + length) };
 }
 
-async function postJson(url, body) {
+async function postJson(url, body, headers = {}) {
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
   const text = await response.text();

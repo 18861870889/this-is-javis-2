@@ -7,21 +7,55 @@ services:
     restart: unless-stopped
     cpus: "${JARVIS_CONTAINER_CPUS:-2.0}"
     mem_limit: "${JARVIS_CONTAINER_MEMORY:-1g}"
-    env_file:
-      - path: .env
-        required: false
     environment:
       NODE_ENV: production
       JARVIS_BIND_HOST: 0.0.0.0
       PORT: 5173
       HARNESS_EXECUTION_MODE: ${JARVIS_CONTAINER_EXECUTION_MODE:-dry_run}
       HERMES_API_TRANSPORT: api
+      HERMES_API_BASE_URL: ${HERMES_API_BASE_URL:-http://host.docker.internal:8642}
+      HERMES_API_KEY: ""
+      HERMES_API_KEY_FILE: /run/secrets/hermes/api.key
+      HERMES_API_TIMEOUT_MS: "30000"
+      JARVIS_BRAIN_INTENT_CLASSIFIER: hermes
+      JARVIS_BRAIN_INTENT_REQUIRED: "true"
+      JARVIS_BRAIN_INTENT_TIMEOUT_MS: "20000"
+      JARVIS_HOME_INTENT_PLANNER: hermes
+      JARVIS_HOME_INTENT_REQUIRED: "true"
+      JARVIS_HOME_INTENT_TIMEOUT_MS: "20000"
+      JARVIS_PC_TASK_MODE: hermes
+      JARVIS_HERMES_PC_WORKSPACE_ROOT: ${JARVIS_HERMES_PC_WORKSPACE_ROOT:-}
+      JARVIS_MCP_ALLOW_REAL: ${JARVIS_MCP_ALLOW_REAL:-false}
+      JARVIS_XIAOZHI_ALLOW_REAL: ${JARVIS_XIAOZHI_ALLOW_REAL:-false}
       JARVIS_SUBAGENT_COMMAND: ""
       JARVIS_DELIVERY_WECHAT_ENABLED: "false"
+      JARVIS_XIAOZHI_DELIVERY_BASE_URL: ${JARVIS_XIAOZHI_DELIVERY_BASE_URL:-http://host.docker.internal:8004}
+      JARVIS_XIAOZHI_DELIVERY_API_KEY: ""
+      JARVIS_XIAOZHI_DELIVERY_API_KEY_FILE: /run/secrets/xiaozhi/api.key
+      HA_BASE_URL: ${HA_BASE_URL:-}
+      HOME_ASSISTANT_URL: ${HOME_ASSISTANT_URL:-}
+      HA_TOKEN: ""
+      HOME_ASSISTANT_TOKEN: ""
+      HA_TOKEN_FILE: /run/secrets/container/ha_token
+      OPENAI_API_KEY: ""
+      OPENAI_BASE_URL: ""
+      OPENAI_MODEL: ""
     ports:
-      - "127.0.0.1:${JARVIS_CONTAINER_PORT:-5173}:5173"
+      - "127.0.0.1:${JARVIS_CONTAINER_PORT:-5183}:5173"
     volumes:
       - jarvis-data:/app/data
+      - type: bind
+        source: ${JARVIS_HERMES_API_KEY_SOURCE:-./data/jarvis-hermes-api.local}
+        target: /run/secrets/hermes
+        read_only: true
+      - type: bind
+        source: ${JARVIS_XIAOZHI_DELIVERY_KEY_SOURCE:-./data/jarvis-xiaozhi-delivery.local}
+        target: /run/secrets/xiaozhi
+        read_only: true
+      - type: bind
+        source: ${JARVIS_HA_TOKEN_SOURCE:-./data/jarvis-container-secrets.local}
+        target: /run/secrets/container
+        read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
     read_only: true

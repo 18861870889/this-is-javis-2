@@ -1,10 +1,10 @@
 # Current Status
 
-> Last updated: 2026-07-07. This document is the short source of truth for current progress, near-term plans, and safety boundaries.
+> Last updated: 2026-07-28. This document is the short source of truth for current progress, near-term plans, and safety boundaries.
 
 ## Current Version
 
-Current engineering progress: `v0.25`.
+Current engineering progress: `v0.26`.
 
 Completed major runtime capabilities:
 
@@ -13,7 +13,7 @@ Completed major runtime capabilities:
   - V2 info architecture: removed per-device text labels, replaced with status dots + room summary badges + legend.
   - Polygon room support: map editor supports irregular polygon rooms via SVG drawing mode; 3D rendering uses THREE.Shape + edge-based walls.
   - See `docs/3D-HOUSE-V2-DESIGN.md` for design spec.
-- OpenAI-compatible LLM planning, currently usable with DeepSeek-style providers.
+- Hermes semantic HomeIntent planning with HCM-only real execution; the container runtime disables the legacy OpenAI/DeepSeek planner path.
 - Home Assistant discovery and HCM mapping.
 - HCM overlay and review decisions.
 - Production command pipeline with audit, replay, learning memory, and explanations.
@@ -208,7 +208,39 @@ Status: baseline implemented and covered by local tests.
 - PC Markdown creation can produce voice feedback plus optional WeChat details.
 - WeChat delivery uses Hermes' `send_message_tool` through the local Hermes Python environment when `JARVIS_DELIVERY_WECHAT_ENABLED=true`.
 
-Boundary: the M0 voice queue is process-local and delivery-status focused. Multi-process queues, richer priority arbitration, and long-form Hermes/Jarvis Agent task delivery remain M1 work.
+- Background results now call Xiaozhi's loopback-only bearer API and track
+  `accepted`, `dispatched`, and `delivered_inferred`; synchronous replies still
+  use Xiaozhi's normal response/TTS path.
+- Transient `offline` and `busy` outcomes use bounded, TTL-aware retries with
+  the same idempotent delivery ID. Voice failure cannot be hidden by successful
+  WeChat delivery in the aggregate status.
+
+Boundary: the M0 queue and Xiaozhi delivery tracker are process-local. Playback
+completion is inferred from the existing protocol rather than correlated by a
+firmware `deliveryId` ACK. Container-mode WeChat delivery remains disabled;
+direct host WeChat-to-Hermes conversation is unaffected.
+
+## v0.26 Container Live Chain
+
+Status: implemented and covered by automated plus local runtime checks.
+
+- Apple Container publishes Jarvis only on `127.0.0.1:5183`, with a read-only root filesystem, dropped capabilities, non-root UID, and persistent `/app/data`.
+- The wrapper keeps Hermes' official authenticated API on host loopback and reaches it through Apple's local forwarding rule. No custom LLM proxy or second Hermes process is required.
+- Non-home Xiaozhi requests call real Hermes tools. A PC acceptance request must create the requested host file before Jarvis reports success.
+- Control requests use Hermes HomeIntent with complete HCM context. Invalid or unavailable semantic planning fails closed when `JARVIS_HOME_INTENT_REQUIRED=true`; HCM still owns grounding, safety, policy, simulation, execution, state verification, and audit.
+- `/api/runtime/readiness` distinguishes configuration from live reachability for Hermes and Home Assistant.
+- Delivery Router pushes background results into Xiaozhi's existing TTS queue.
+  It records `accepted`, later `dispatched`, and finally
+  `delivered_inferred`; offline/busy/expired/failed outcomes remain explicit.
+- Container secrets are read from three read-only secret directories. The whole
+  `.env` is not injected, and `container inspect` contains no inline HA, Hermes,
+  or delivery key.
+- The Xiaozhi WebSocket smoke requires an allowed device identity and verifies STT event, TTS text, TTS start/stop, binary audio, and the host-side artifact.
+
+Boundary: real Home Assistant acceptance and physical StackChan playback remain
+open while those devices are offline. Jarvis must not infer success from a
+generated service call or TTS enqueue; real acceptance requires HA execution,
+state readback, physical observation, and device playback.
 
 ## Current Runtime Chain
 
