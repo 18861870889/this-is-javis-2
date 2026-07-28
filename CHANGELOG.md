@@ -12,6 +12,10 @@ All notable changes to this project will be documented in this file. The format 
 - Portable Node version, editor, and line-ending configuration.
 - Reproducible OCI image, Apple Container/Docker deployment commands, hardened Compose defaults, and a production container smoke test.
 - Container deployment runbook and documented environment-variable examples.
+- Authenticated host-side Hermes API isolation with reviewed search and PC-workspace tools.
+- Unified Hermes/Jarvis Brain intent classification and structured home-intent planning before HCM authorization.
+- Xiaozhi Delivery Router adapter with bounded retry, idempotent delivery IDs, TTL handling, voice-first status aggregation, and audit state.
+- Host-side Xiaozhi lifecycle and security preflight commands plus live-chain acceptance guidance.
 
 ### Changed
 
@@ -20,10 +24,14 @@ All notable changes to this project will be documented in this file. The format 
 - Updated Vite to 8.1.4 and moved build tooling to development dependencies.
 - Serve the built frontend directly in production while keeping Vite middleware limited to development.
 - Default container networking to localhost, Home Assistant execution to `dry_run`, and Hermes integration to API transport.
+- Mount HA, Hermes, and Xiaozhi credentials from separate read-only secret directories instead of placing values in container configuration.
+- Preserve request-scoped StackChan device and session identity through Xiaozhi without mutating shared LLM client state.
 
 ### Fixed
 
 - Isolated integration tests from local Hermes/subagent environment variables.
+- Prevented late Xiaozhi listen events after timeout, abort, or reconnect from acknowledging a newer delivery.
+- Made Delivery Router status aggregation preserve voice-channel failures even when another channel succeeds.
 
 ### Security
 
@@ -33,6 +41,7 @@ All notable changes to this project will be documented in this file. The format 
 - Parse provider URLs before matching trusted DeepSeek hostnames and use SHA-256 for semantic cache identifiers.
 - Run the production container as a non-root user with a read-only root filesystem, dropped Linux capabilities, `no-new-privileges`, and a dedicated writable data volume.
 - Rate-limit production SPA fallback requests with standard response headers.
+- Added authenticated, loopback-only Hermes and Xiaozhi delivery services, strict private-host validation, redacted connection logging, and fail-closed real-mode dependency gates.
 
 ## [0.1.0] - 2026-07-11
 

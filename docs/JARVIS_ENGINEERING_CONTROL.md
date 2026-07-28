@@ -119,12 +119,25 @@ Implemented behavior:
 - Adds `delivery` metadata to routed results without replacing HCM command status, HCM audit, or MCP structured content.
 - Writes delivery audit entries to `JARVIS_DELIVERY_AUDIT_PATH`, defaulting to `data/delivery-audit.local.jsonl`.
 - Home control and state-query results use short StackChan/Xiaozhi voice delivery by default.
-- Restricted PC Markdown creation uses voice plus optional WeChat detail delivery.
+- Inline Xiaozhi replies are recorded as `dispatched`, not as confirmed playback.
+- Background voice results enter the in-memory queue and are submitted to
+  Xiaozhi's authenticated loopback TTS API. State progresses through
+  `accepted`, `dispatched`, and `delivered_inferred`; offline, busy, expiry, and
+  failure are preserved.
+- Transient offline/busy results retry on a bounded TTL-aware schedule with the
+  same delivery ID. Aggregate status remains voice-first so another channel
+  cannot hide failed StackChan delivery.
+- PC/Hermes results use voice plus optional WeChat detail delivery.
 - Hermes WeChat delivery uses Hermes' own `send_message_tool` when `JARVIS_DELIVERY_WECHAT_ENABLED=true`; tests and normal dry runs keep this disabled.
 
 Boundary:
 
-- M0 does not yet persist the voice queue outside memory.
+- M0 does not yet persist the Jarvis queue or Xiaozhi tracker outside memory.
+- `delivered_inferred` is based on the current automatic-listening protocol; a
+  strict correlated playback ACK requires a future firmware extension.
+- Container-mode WeChat delivery is disabled until a reviewed host adapter can
+  send without mounting Hermes credentials; direct Hermes WeChat chat remains
+  outside the Router.
 - M0 does not yet implement rich priority arbitration beyond recording delivery status.
 - Long-form Hermes/Jarvis Agent task delivery is now represented by Task Runtime M1; real multi-step agent progress streaming remains future work.
 
@@ -132,8 +145,8 @@ Boundary:
 
 Implemented behavior:
 
-- StackChan/Xiaozhi PC file requests such as "新建一个小黑文文件并写入 helloworld" are handled as local Agent Tasks, not Hermes text slow-path.
-- PC file creation remains restricted to Markdown files inside `JARVIS_PC_WORKSPACE_ROOT`.
+- In the container runtime, StackChan/Xiaozhi PC requests are handled by the real Hermes Agent toolset through `JARVIS_PC_TASK_MODE=hermes`.
+- Jarvis supplies `JARVIS_HERMES_PC_WORKSPACE_ROOT` as the default host workspace and instructs Hermes to refuse clearly high-risk operations. The older local Markdown-only handler remains available for development and deterministic tests.
 - Long-running Hermes tasks such as "写一个 app" create an in-memory Task Runtime record, immediately return a short voice acknowledgement, and continue in the background.
 - Task status can be queried through `/api/tasks`, `/api/tasks/:taskId`, or by voice phrases like "刚才那个 app 做到哪了".
 - Task audit entries write to `JARVIS_TASK_AUDIT_PATH`.
@@ -145,14 +158,14 @@ Boundary:
 
 - Task Runtime M1 is process-local and in-memory; a multi-process/container deployment needs SQLite, Redis, or another durable queue.
 - Hermes long-task execution currently reports start/completion/failure summaries; fine-grained streaming progress from Hermes tools is not implemented yet.
-- Hermes HomeIntent adds latency and has a strict fallback: timeout, unavailable, or invalid JSON falls back to local Brain behavior.
+- Hermes HomeIntent adds latency. With `JARVIS_HOME_INTENT_REQUIRED=true`, timeout, unavailable, or invalid JSON fails closed unless a verified semantic-cache entry is available; it does not fall back to an old provider planner.
 
 ## M3 Context, Cache, And Subagent Contract
 
 Implemented behavior:
 
 - Short-term context memory persists recent PC files and task summaries in `JARVIS_CONTEXT_MEMORY_PATH`.
-- Follow-up file questions such as "刚才的文件目录是哪个" are answered from context before PC-file parsing or Hermes slow path.
+- Explicit follow-up file questions such as "刚才的文件目录是哪个" are answered from context before Hermes. New action requests that merely mention "电脑工作区" are not consumed by context memory.
 - Semantic planning cache stores successful home-control planner drafts in `JARVIS_SEMANTIC_CACHE_PATH` and writes Obsidian-compatible Markdown notes under `JARVIS_OBSIDIAN_SEMANTIC_DIR`.
 - Semantic cache hits may skip Hermes HomeIntent planning, but still enter HCM grounding, safety, policy, simulation, execution, verification, and audit.
 - Long tasks use a real configured subprocess subagent when `JARVIS_SUBAGENT_COMMAND` is set. Success and failure both write Task Runtime status and Delivery Router audit.

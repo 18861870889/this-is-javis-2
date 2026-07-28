@@ -30,10 +30,10 @@ StackChan/stackchen/m5stack devices are treated as black-box voice terminals. Ve
 | State query fallback when HA is unavailable | `src/jarvisServerRoutes.test.js` | HA intentionally unconfigured; mock Hermes configured | "书房射灯开着吗" can fall back to agent path and creates no HCM command audit entry | Hermes may not know live HA state unless we later provide read-only tools/context |
 | Learning feedback accept/reject/undo | `src/jarvisLearningFeedback.test.js`, `src/jarvisPendingPromptQueue.test.js`, `src/jarvisServerRoutes.test.js` | Temp audit, learning memory, and pending prompt files | `accept` marks candidate `accepted` with `application`; `reject` marks `ignored`; `undo` tombstones the candidate; bare "可以" binds to the latest pending prompt when present | Feedback falls back to latest compatible audit only when there is no pending prompt |
 | Automation accepted remains shadow | `src/automationSuggestionEngine.test.js` | Fixture HCM home and audit entries | Accepted suggestions appear in `activeSuggestions`; memory mode remains `shadow`; `autoApply` and `realDeviceControl` remain false | No HA automation CRUD yet; accepted means guidance/confirmation, not installed automation |
-| Hermes/Jarvis Agent path | `src/jarvisServerRoutes.test.js` | Mock OpenAI-compatible `/v1/chat/completions` endpoint | Agent-task utterance forwards to Hermes endpoint with session header and returns speakable text; timeout returns a speakable `brain_timeout` fallback | Need contract tests against the chosen Hermes/Jarvis Agent deployment once selected |
+| Hermes/Jarvis Agent path | `src/jarvisServerRoutes.test.js`, `src/hermesApiManager.test.js` | Mock contract plus Hermes native API smoke | Agent-task utterance forwards to Hermes with session continuity and a PC workspace; the installed gateway API is authenticated and container-reachable | Long tool runs still need durable job streaming |
 | Xiaozhi local Server Jarvis brain | `src/jarvisServerRoutes.test.js` | Mock HA and temp PC workspace; call Jarvis `/v1/chat/completions` with Xiaozhi-style OpenAI payload | Home text becomes `HomeIntent` and routes through HCM dry-run/audit; PC text creates a `.md` file under `JARVIS_PC_WORKSPACE_ROOT`; reply is speakable text | Real Xiaozhi server/device contract test still required |
-| Delivery Router M0 | `src/deliveryRouter.test.js`, `src/jarvisServerRoutes.test.js` | Local test process; mock WeChat sender; temp delivery audit path | StackChan/Xiaozhi/MCP origins receive voice delivery metadata and delivery audit; direct Hermes WeChat origins are skipped; PC Markdown can request voice plus optional WeChat detail; duplicate voice commands do not create extra delivery | M0 queue is process-local; real Hermes WeChat send remains manual smoke behind `JARVIS_DELIVERY_WECHAT_ENABLED=true` |
-| M3 context memory | `src/jarvisServerRoutes.test.js` | Temp context memory path and PC workspace | After creating a PC Markdown file, follow-up questions like "刚才的文件目录是哪个" answer from `jarvis-context` and do not call Hermes or create another file | Context memory is local JSON; multi-process coordination is future SQLite |
+| Delivery Router M0 | `src/deliveryRouter.test.js`, `src/xiaozhiDeliveryAdapter.test.js`, Xiaozhi `test_delivery*.py` | Local tests plus loopback Xiaozhi service; bearer key in ignored `0600` file | Inline output is `dispatched`; async output reaches the existing TTS queue and progresses `accepted -> dispatched -> delivered_inferred`; offline/busy use bounded retries; expired/failed stay explicit; WeChat success cannot hide voice failure; direct Hermes WeChat origins are skipped | `delivered_inferred` is not a firmware-correlated ACK; queues are process-local |
+| M3 context memory | `src/jarvisContextMemory.test.js`, `src/jarvisServerRoutes.test.js` | Temp context memory path and PC workspace | Explicit follow-ups such as "刚才的文件目录是哪个" use memory; new actions mentioning "电脑工作区" are not consumed and still reach Hermes | Context memory is local JSON; multi-process coordination is future SQLite |
 | M3 semantic planning cache | `src/jarvisServerRoutes.test.js` | Mock HA and mock Hermes HomeIntent endpoint; temp semantic cache and Obsidian dir | First successful Hermes HomeIntent records JSON cache + Markdown note; repeated normalized command hits cache and skips Hermes; opposite action misses cache | Matching is conservative exact-normalized semantic key; embedding/fuzzy retrieval is future work |
 | M3 subagent loop | `src/jarvisServerRoutes.test.js` | Real Node subprocess configured through `JARVIS_SUBAGENT_COMMAND` | Long task starts a real subprocess; success and failure both end in terminal task status and `task_runtime` delivery audit; failure delivery is high priority | Production subagent contract is subprocess JSON for M3; richer Hermes worker pools are future work |
 | StackChan black-box boundary | `src/jarvisServerRoutes.test.js`, this plan, `docs/JARVIS_STACKCHAN_HTTP_BRIDGE.md` | No StackChan source checkout required | Tests only send HTTP payloads that a bridge could produce; no device code is imported or patched | MQTT/HA Assist/serial bridges remain optional future adapters |
@@ -58,6 +58,8 @@ Run full regression:
 
 ```bash
 npm test -- --run
+npm run container:smoke
+npm run container:live-check
 ```
 
 Run syntax validation for the server entry:
@@ -73,6 +75,14 @@ Run latency smoke against a running Jarvis service:
 npm run jarvis:latency
 JARVIS_LATENCY_FAST_PATH=1 npm run jarvis:latency
 ```
+
+Run the Xiaozhi service-chain check with a device id already present in the server allowlist:
+
+```bash
+XIAOZHI_WS_SMOKE_DEVICE_ID='<allowed-device-id>' npm run xiaozhi:ws-smoke -- pc
+```
+
+Passing requires an echoed STT event, matching TTS text, TTS `start/stop`, nonzero binary audio, and the requested host file. This injects text into Xiaozhi and does not replace a final microphone/wake-word test on StackChan.
 
 ## Manual Smoke Test
 

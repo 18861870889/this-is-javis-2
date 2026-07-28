@@ -2,6 +2,9 @@ export const JARVIS_CONTEXT_MEMORY_VERSION = "0.1";
 
 const DEFAULT_MAX_PC_FILES = 20;
 const DEFAULT_MAX_TASKS = 20;
+const PC_FILE_LOCATION_PATTERN = /(在哪|哪里|目录|路径|位置|放哪|存哪)/;
+const PC_FILE_ACTION_PATTERN = /(创建|新建|生成|写入|追加|改写|修改|编辑|重命名|复制|拷贝|移动|删除|清空|打开|关闭|运行|执行|发送|上传|下载|保存|另存|读取|压缩|解压|提交|发布|安装|卸载)/;
+const ACTION_CONNECTOR_PATTERN = /(?:然后|接着|随后|顺便|另外|同时|并且|以及|再|还要|还得|并)/;
 
 export function createJarvisContextMemory({
   read = () => null,
@@ -74,10 +77,11 @@ export function createJarvisContextMemory({
 
 export function answerFromContextMemory(memory, text = "") {
   const state = normalizeContextMemory(memory);
-  const normalized = normalizeQuestionText(text);
+  const source = normalizeText(text);
+  const normalized = normalizeQuestionText(source);
   if (!normalized) return null;
 
-  if (looksLikeRecentPcFileLocationQuestion(normalized)) {
+  if (looksLikeRecentPcFileLocationQuestion(source)) {
     const file = findReferencedPcFile(state.recentPcFiles, normalized);
     if (!file) return {
       type: "pc_file_location",
@@ -121,10 +125,53 @@ export function summarizeContextMemory(memory) {
 }
 
 export function looksLikeRecentPcFileLocationQuestion(text = "") {
-  const value = normalizeQuestionText(text);
+  const source = normalizeText(text).toLowerCase();
+  const value = normalizeQuestionText(source);
   return /(刚才|刚刚|上次|之前|那个|文件|文档|md|markdown|小黑)/i.test(value)
-    && /(在哪|哪里|目录|路径|位置|放哪|存哪|工作区)/.test(value)
-    && /(文件|文档|md|markdown|创建|新建|写入|小黑|那个|目录|路径)/i.test(value);
+    && PC_FILE_LOCATION_PATTERN.test(value)
+    && /(文件|文档|md|markdown|创建|新建|写入|小黑|那个|目录|路径)/i.test(value)
+    && !containsAdditionalPcFileAction(source);
+}
+
+function containsAdditionalPcFileAction(text = "") {
+  const value = normalizeText(text).replace(/\s+/g, "").toLowerCase();
+  if (!value || !PC_FILE_LOCATION_PATTERN.test(value)) return false;
+
+  const clauses = value
+    .split(new RegExp(`[，,。.!！?？;；]|${ACTION_CONNECTOR_PATTERN.source}`, "g"))
+    .filter(Boolean);
+  const locationClauseIndexes = new Set(
+    clauses
+      .map((clause, index) => (PC_FILE_LOCATION_PATTERN.test(clause) ? index : -1))
+      .filter((index) => index >= 0),
+  );
+
+  if (clauses.some((clause, index) => (
+    !locationClauseIndexes.has(index) && PC_FILE_ACTION_PATTERN.test(clause)
+  ))) {
+    return true;
+  }
+
+  // Connectors make an otherwise valid location follow-up a compound command.
+  // This also catches compact speech such as "文件在哪里再写入一行".
+  const connectedAction = new RegExp(
+    `${ACTION_CONNECTOR_PATTERN.source}(?:请|帮我|替我|给我|把|将|不要|别|先|继续|也)?${PC_FILE_ACTION_PATTERN.source}`,
+  );
+  if (connectedAction.test(value)) return true;
+
+  // A command can precede the location question: "复制一份，再告诉我文件在哪".
+  // Historical modifiers such as "刚才创建的文件在哪里" remain pure queries.
+  const locationIndex = value.search(PC_FILE_LOCATION_PATTERN);
+  const prefix = locationIndex >= 0 ? value.slice(0, locationIndex) : "";
+  const actionMatch = prefix.match(PC_FILE_ACTION_PATTERN);
+  if (!actionMatch) return false;
+
+  const actionIndex = actionMatch.index ?? -1;
+  const afterAction = actionIndex >= 0
+    ? prefix.slice(actionIndex + actionMatch[0].length)
+    : "";
+  return !/^(?:过|了)?的?(?:那个|这(?:个|份)?|该)?(?:文件|文档|md|markdown)/i.test(afterAction)
+    && !/^(?:在)?$/.test(afterAction);
 }
 
 function looksLikeRecentTaskContextQuestion(text = "") {
